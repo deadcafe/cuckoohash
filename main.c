@@ -19,7 +19,7 @@
 static void
 usage(const char *prog)
 {
-        fprintf(stderr, "%s [-n nb] [-c ctx_size] [-s] [-l]\n", prog);
+        fprintf(stderr, "%s [-n nb] [-c ctx_size] [-s] [-l] [-b]\n", prog);
 }
 
 int
@@ -31,14 +31,18 @@ main(int ac,
         bool do_speed_test = false;
         bool do_analyze = false;
         bool do_unit = false;
+        bool do_basic = false;
         unsigned ctx_size = 5;	/* 1~8 default:5 */
         unsigned flags = 0;
 
-        while ((opt = getopt(ac, av, "c:n:slua")) != -1) {
+        while ((opt = getopt(ac, av, "c:n:sluab")) != -1) {
 
                 switch (opt) {
                 case 'a':
                         do_analyze = true;
+                        break;
+                case 'b':
+                        do_basic = true;
                         break;
                 case 'c':
                         ctx_size = atoi(optarg);
@@ -61,7 +65,7 @@ main(int ac,
                 }
         }
         fprintf(stdout, "Memory size:%zu\n", cuckoo_sizeof(nb));
-        cuckoo_test(nb, ctx_size, do_speed_test, do_analyze, do_unit, flags);
+        cuckoo_test(nb, ctx_size, do_basic, do_speed_test, do_analyze, do_unit, flags);
 
         return 0;
 }

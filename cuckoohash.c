@@ -7,6 +7,7 @@
 #include <string.h>
 #include <assert.h>
 #include <sched.h>
+#include <unistd.h>
 
 #include "cuckoohash.h"
 
@@ -2890,12 +2891,13 @@ speed_sub_sub(struct cuckoo_hash_s *cuckoo,
         struct cuckoo_key_s *key_p[256];
         double tsc = 0;
 
-        uint64_t start_cnt = cuckoo->cnt;
-        uint64_t start_tsc = cuckoo->tsc;
-
         for (unsigned k = 0; k < ARRAYOF(key); k++)
                 key_p[k] = &key[k];
 
+        sched_yield();
+        usleep(10000);
+        uint64_t start_cnt = cuckoo->cnt;
+        uint64_t start_tsc = cuckoo->tsc;
         for (unsigned base = 0; base < nb; base += ARRAYOF(key)) {
                 unsigned num;
 
@@ -2928,7 +2930,7 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
 {
         double add, search;
 
-        unsigned target_num = 256*1;
+        unsigned target_num = 256 * 1;
 
         cuckoo_reset(cuckoo);
 
@@ -3013,6 +3015,7 @@ speed_test(struct cuckoo_hash_s *cuckoo,
 int
 cuckoo_test(unsigned nb,
             unsigned ctx_size,
+            bool do_basic,
             bool do_speed_test,
             bool do_analyze,
             bool do_unit,
@@ -3028,16 +3031,18 @@ cuckoo_test(unsigned nb,
 
         struct cuckoo_key_s **key = init_key(cuckoo->nb);
 
-        SWAP(calk_hash, cuckoo->calc_hash);
-        if (single_add_del_test(cuckoo, key, nb))
-                goto end;
+        if (do_basic) {
+                SWAP(calk_hash, cuckoo->calc_hash);
+                if (single_add_del_test(cuckoo, key, nb))
+                        goto end;
 
-        if (collision_test(cuckoo, key, nb))
-                goto end;
+                if (collision_test(cuckoo, key, nb))
+                        goto end;
 
-        SWAP(calk_hash, cuckoo->calc_hash);
-        if (max_test(cuckoo, key, nb))
-                goto end;
+                SWAP(calk_hash, cuckoo->calc_hash);
+                if (max_test(cuckoo, key, nb))
+                        goto end;
+        }
 
         if (do_speed_test) {
                 if (speed_test(cuckoo, key, nb))

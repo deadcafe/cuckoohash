@@ -315,6 +315,7 @@ extern int cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
 
 extern int cuckoo_test(unsigned nb,
                        unsigned ctx_size,
+                       bool do_basic,
                        bool do_speed_test,
                        bool do_analyze,
                        bool do_unit,
