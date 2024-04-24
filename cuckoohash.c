@@ -74,7 +74,7 @@ struct cuckoo_find_ctx_s {
         struct cuckoo_node_s **node_pp;
 
         unsigned idx;				/* request index */
-        enum cuckoo_find_state_e state;	/* */
+        enum cuckoo_find_state_e state;		/* */
 } _CUCKOO_CACHE_ALIGNED;
 
 /*
@@ -2928,6 +2928,8 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
 {
         double add, search;
 
+        unsigned target_num = 256*1;
+
         cuckoo_reset(cuckoo);
 
         random_key(key_pp, nb);
@@ -2936,7 +2938,9 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
         fprintf(stdout, "bulk with_hash:%d add Speed n:%u %0.2f tsc/key\n", w_hash, nb, add);
 
         random_key(key_pp, nb);
-        search = speed_sub_sub(cuckoo, key_pp, nb, w_hash);
+        cuckoo->tsc = 0;
+        cuckoo->cnt = 0;
+        search = speed_sub_sub(cuckoo, key_pp, target_num, w_hash);
         cuckoo_dump(cuckoo, stdout, "speed find");
         fprintf(stdout, "bulk with_hash:%d find speed n:%u %0.2f tsc/key\n\n", w_hash, nb, search);
 
@@ -2953,7 +2957,7 @@ analyze_ctx_num(struct cuckoo_hash_s *cuckoo,
         for (unsigned i = 0; i < 2; i++) {
                 for (int w_hash = 0; w_hash < 2; w_hash++) {
                         uint64_t best_tsc = UINT64_C(-1);
-                        unsigned best_nb;
+                        unsigned best_nb = -1;
 
                         for (unsigned ctx_nb = 1; ctx_nb < 9; ctx_nb++) {
                                 cuckoo->ctx_nb = ctx_nb;
