@@ -6,7 +6,6 @@
  * Spec:
  */
 
-
 #ifndef _CUCKOOHASH_H_
 #define _CUCKOOHASH_H_
 
@@ -30,8 +29,12 @@
 
 #define CUCKOO_BUCKET_ENTRY_SZ	16
 #define CUCKOO_NB_ENTRIES_MIN	(CUCKOO_BUCKET_ENTRY_SZ * CUCKOO_BUCKET_ENTRY_SZ * CUCKOO_BUCKET_ENTRY_SZ)
-#define CUCKOO_MAX_DEPTH	2
-#define CUCKOO_PIPELINE_NB	32
+#define CUCKOO_FIND_DEPTH	2
+#define CUCKOO_PIPELINE_NB	24
+
+
+#define CUCKOO_EFFECTIVE_CAPA(nb)	(((nb) / CUCKOO_BUCKET_ENTRY_SZ) * 13)
+
 
 #define CUCKOO_INVALID_HASH64	UINT64_C(-1)	/* -1 : invalid */
 #define CUCKOO_INVALID_HVAL	UINT32_C(-1)
@@ -73,16 +76,16 @@ struct cuckoo_key_s {
                 uint32_t d32[12];
                 uint64_t d64[6 ];
         } val;
-        union cuckoo_hash_u hash;
 };
 
 /*
  *　128 bytes
  */
 struct cuckoo_node_s {
-        struct cuckoo_key_s key;
-
+        struct cuckoo_key_s key _CUCKOO_CACHE_ALIGNED;
         IDXQ_ENTRY(cuckoo_node_s) entry;
+        union cuckoo_hash_u hash;
+
 
         /* flow data */
         uint32_t test_id;
@@ -208,14 +211,13 @@ extern unsigned cuckoo_del_bulk(struct cuckoo_hash_s *cuckoo,
  * @param fkey_pp to the node search key array.
  * @param nb to the number of keys.
  * @param node_pp to the node pointer array
- * @param with_hash to the hashed flag. (True if already hashed)
  * @return Number of nodes searched.
  */
 extern unsigned cuckoo_find_bulk(struct cuckoo_hash_s *cuckoo,
                                  const struct cuckoo_key_s * const *fkey_pp,
                                  unsigned nb,
-                                 struct cuckoo_node_s **node_pp,
-                                 int with_hash);
+                                 struct cuckoo_node_s **node_pp);
+
 
 /**
  * @brief Perform hash of key
@@ -253,7 +255,7 @@ cuckoo_find_oneshot(struct cuckoo_hash_s *cuckoo,
 {
         struct cuckoo_node_s *node_p = NULL;
 
-        cuckoo_find_bulk(cuckoo, &fkey_p, 1, &node_p, 0);
+        cuckoo_find_bulk(cuckoo, &fkey_p, 1, &node_p);
         return node_p;
 }
 
@@ -319,6 +321,7 @@ extern int cuckoo_test(unsigned nb,
                        bool do_speed_test,
                        bool do_analyze,
                        bool do_unit,
+                       bool do_mem,
                        unsigned flags);
 
 #endif	/* !_CUCKOOHASH_H_ */

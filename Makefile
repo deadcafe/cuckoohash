@@ -10,7 +10,7 @@ OPTFLAGS := -O3 -march=native -fomit-frame-pointer -fpie -fpic
 
 CFLAGS  = -g $(OPTFLAGS) -Werror -Wextra -Wall -Wstrict-aliasing -std=gnu11 -pipe
 CPPFLAGS = -c -I$(CURDIR) -D_GNU_SOURCE -DENABLE_TRACER -DENABLE_UINIT_TEST
-LIBS =
+LIBS = -lpapi
 LDFLAGS =
 
 #CFLAGS += -funroll-loops -frerun-loop-opt
