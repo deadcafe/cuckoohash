@@ -104,9 +104,9 @@ struct cuckoo_find_engine_s {
 typedef uint64_t (*find_idx_in_bucket_t)(const struct cuckoo_hash_s *,
                                          const struct cuckoo_bucket_s *,
                                          uint32_t);
-typedef uint64_t (*find_hval_in_bucket_single_t)(const struct cuckoo_hash_s *,
-                                                 const struct cuckoo_bucket_s *,
-                                                 uint32_t);
+typedef uint64_t (*find_hval_in_bucket_t)(const struct cuckoo_hash_s *,
+                                          const struct cuckoo_bucket_s *,
+                                          uint32_t);
 typedef int (*debug_fprintf_t)(FILE *stream, const char *format, ...);
 
 IDXQ_HEAD(cuckoo_node_q_s, cuckoo_node_s);
@@ -129,7 +129,7 @@ struct cuckoo_hash_s {
         /* drivers */
         cuckoo_hash_func_t calc_hash;
         find_idx_in_bucket_t find_idx;
-        find_hval_in_bucket_single_t find_hval_single;
+        find_hval_in_bucket_t find_hval;
         cuckoo_node_initializer_t node_init;
 
         /* tables */
@@ -146,7 +146,6 @@ struct cuckoo_hash_s {
         uint64_t bk_full;
 
         struct cuckoo_node_q_s used_fifo;
-
         struct cuckoo_find_engine_s engine _CUCKOO_CACHE_ALIGNED;
 
         char payload[] _CUCKOO_CACHE_ALIGNED;
@@ -850,8 +849,8 @@ x86_handler_init (struct cuckoo_hash_s *cuckoo,
                 if (!CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_SSE41) && (ecx & bit_SSE4_1)) {
                         TRACER("use SSE4.1 ready\n");
 
-                        cuckoo->find_idx         = SSE41_find_idx_in_bucket;
-                        cuckoo->find_hval_single = SSE41_find_hval_in_bucket;
+                        cuckoo->find_idx  = SSE41_find_idx_in_bucket;
+                        cuckoo->find_hval = SSE41_find_hval_in_bucket;
                 }
 #endif
 
@@ -868,8 +867,8 @@ x86_handler_init (struct cuckoo_hash_s *cuckoo,
                 if (!CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_AVX2) && (ebx & bit_AVX2)) {
                         TRACER("use AVX2 ready\n");
 
-                        cuckoo->find_idx         = AVX2_find_idx_in_bucket;
-                        cuckoo->find_hval_single = AVX2_find_hval_in_bucket;
+                        cuckoo->find_idx  = AVX2_find_idx_in_bucket;
+                        cuckoo->find_hval = AVX2_find_hval_in_bucket;
                 }
 #endif
 
@@ -877,8 +876,8 @@ x86_handler_init (struct cuckoo_hash_s *cuckoo,
                 if (!CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_AVX512) && (ebx & bit_AVX512F)) {
                         TRACER("use AVX512F ready\n");
 
-                        cuckoo->find_idx         = AVX512_find_idx_in_bucket;
-                        cuckoo->find_hval_single = AVX512_find_hval_in_bucket;
+                        cuckoo->find_idx  = AVX512_find_idx_in_bucket;
+                        cuckoo->find_hval = AVX512_find_hval_in_bucket;
                 }
 #endif
         }
@@ -931,8 +930,8 @@ static void
 arm_handler_init(struct cuckoo_hash_s *cuckoo,
                  unsigned flags __attribute__((unused)))
 {
-        cuckoo->find_idx         = NEON_find_idx_in_bucket;
-        cuckoo->find_hval_single = NEON_find_hval_in_bucket_single;
+        cuckoo->find_idx  = NEON_find_idx_in_bucket;
+        cuckoo->find_hval = NEON_find_hval_in_bucket;
 }
 #endif /* __ARM_NEON__ */
 
@@ -1037,7 +1036,7 @@ unsigned
 cuckoo_bk_empty_nb(const struct cuckoo_hash_s *cuckoo,
                 struct cuckoo_bucket_s *bk)
 {
-        uint64_t mask = cuckoo->find_hval_single(cuckoo, bk, CUCKOO_INVALID_HVAL);
+        uint64_t mask = cuckoo->find_hval(cuckoo, bk, CUCKOO_INVALID_HVAL);
 
         return __builtin_popcountll(mask);
 }
@@ -1141,7 +1140,7 @@ flipflop_bucket(const struct cuckoo_hash_s *cuckoo,
         unsigned dst_pos = -1;
         int ret = -1;
 
-        uint64_t empty = cuckoo->find_hval_single(cuckoo, dst_bk, CUCKOO_INVALID_HVAL);
+        uint64_t empty = cuckoo->find_hval(cuckoo, dst_bk, CUCKOO_INVALID_HVAL);
         if (empty) {
                 dst_pos = __builtin_ctzll(empty);
 
@@ -1252,8 +1251,8 @@ insert_node(struct cuckoo_hash_s *cuckoo,
         uint64_t empt[2];
 
 #if 0
-        empt[0] = cuckoo->find_hval_single(cuckoo, ctx->bk[0].ptr, CUCKOO_INVALID_HVAL);
-        empt[1] = cuckoo->find_hval_single(cuckoo, ctx->bk[1].ptr, CUCKOO_INVALID_HVAL);
+        empt[0] = cuckoo->find_hval(cuckoo, ctx->bk[0].ptr, CUCKOO_INVALID_HVAL);
+        empt[1] = cuckoo->find_hval(cuckoo, ctx->bk[1].ptr, CUCKOO_INVALID_HVAL);
         if (empt[0] || empt[1]) {
                 /* which use bk[0] or bk[1] */
 
@@ -1273,9 +1272,9 @@ insert_node(struct cuckoo_hash_s *cuckoo,
                 }
         }
 #else
-        empt[0] = cuckoo->find_hval_single(cuckoo, ctx->bk[0].ptr, CUCKOO_INVALID_HVAL);
+        empt[0] = cuckoo->find_hval(cuckoo, ctx->bk[0].ptr, CUCKOO_INVALID_HVAL);
         if (!empt[0])
-                empt[1] = cuckoo->find_hval_single(cuckoo, ctx->bk[1].ptr, CUCKOO_INVALID_HVAL);
+                empt[1] = cuckoo->find_hval(cuckoo, ctx->bk[1].ptr, CUCKOO_INVALID_HVAL);
 
         if (empt[0]) {
                 bk = ctx->bk[0].ptr;
@@ -1431,15 +1430,11 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
 
         case CUCKOO_FIND_STAGE_FINDHVAL:
                 /* find hash value in bucket */
-                ctx->bk[0].hits = cuckoo->find_hval_single(cuckoo,
-                                                           ctx->bk[0].ptr,
-                                                           hash2val(ctx->hash));
+                ctx->bk[0].hits = cuckoo->find_hval(cuckoo, ctx->bk[0].ptr, hash2val(ctx->hash));
                 if (ctx->bk[0].hits) {
                         prefetch_node_in_bucket(cuckoo, ctx->bk[0].ptr, ctx->bk[0].hits);
                 } else {
-                        ctx->bk[1].hits = cuckoo->find_hval_single(cuckoo,
-                                                                   ctx->bk[1].ptr,
-                                                                   hash2val(ctx->hash));
+                        ctx->bk[1].hits = cuckoo->find_hval(cuckoo, ctx->bk[1].ptr, hash2val(ctx->hash));
                         if (ctx->bk[1].hits) {
                                 prefetch_node_in_bucket(cuckoo, ctx->bk[1].ptr, ctx->bk[1].hits);
                         }
@@ -1455,14 +1450,10 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
                         for (unsigned i = 0; i < 2; i++) {
                                 if (ctx->bk[i].hits == CUCKOO_INVALID_FLAGS) {
                                         ctx->bk[i].hits =
-                                                cuckoo->find_hval_single(cuckoo,
-                                                                         ctx->bk[i].ptr,
-                                                                         hash2val(ctx->hash));
+                                                cuckoo->find_hval(cuckoo, ctx->bk[i].ptr, hash2val(ctx->hash));
                                 }
 
-                                node = find_node_in_bucket(cuckoo,
-                                                           ctx->bk[i].ptr,
-                                                           ctx->bk[i].hits,
+                                node = find_node_in_bucket(cuckoo, ctx->bk[i].ptr, ctx->bk[i].hits,
                                                            ctx->fkey_p, &pos);
                                 if (node) {
                                         if (i)
@@ -1626,9 +1617,9 @@ cuckoo_init(struct cuckoo_hash_s *cuckoo,
         else
                 cuckoo->ctx_nb = ctx_nb;
 
-        cuckoo->find_idx         = GENERIC_find_idx_in_bucket;
-        cuckoo->find_hval_single = GENERIC_find_hval_in_bucket;
-        cuckoo->calc_hash        = GENERIC_calc_hash;
+        cuckoo->find_idx  = GENERIC_find_idx_in_bucket;
+        cuckoo->find_hval = GENERIC_find_hval_in_bucket;
+        cuckoo->calc_hash = GENERIC_calc_hash;
 
 #if defined(__x86_64__)
         x86_handler_init(cuckoo, flags);
