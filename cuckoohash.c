@@ -1395,13 +1395,15 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
 
         switch (ctx->stage) {
         default:
+        case CUCKOO_FIND_STAGE_DONE:
+                break;
+
+        case CUCKOO_FIND_STAGE_STANDBY_3rd:
+        case CUCKOO_FIND_STAGE_STANDBY_2th:
                 if (engine->next < nb)
                         ctx->stage = CUCKOO_FIND_STAGE_DONE;
                 else
                         ctx->stage += 1;
-                break;
-
-        case CUCKOO_FIND_STAGE_DONE:
                 break;
 
         case CUCKOO_FIND_STAGE_CALCHASH:
@@ -1428,7 +1430,6 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
                 break;
 
         case CUCKOO_FIND_STAGE_FINDHVAL:
-
                 /* find hash value in bucket */
                 ctx->bk[0].hits = cuckoo->find_hval_single(cuckoo,
                                                            ctx->bk[0].ptr,
