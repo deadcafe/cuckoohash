@@ -1417,7 +1417,7 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
                         ctx->bk[0].ptr  = fetch_bucket(cuckoo, hash2idx(cuckoo, ctx->hash, 0));
                         ctx->bk[0].hits = CUCKOO_INVALID_FLAGS;
 
-                        ctx->bk[1].ptr  = fetch_bucket(cuckoo, hash2idx(cuckoo, ctx->hash, 1));
+                        ctx->bk[1].ptr  = bucket_ptr(cuckoo, hash2idx(cuckoo, ctx->hash, 1));
                         ctx->bk[1].hits = CUCKOO_INVALID_FLAGS;
 
                         list_node(cuckoo, ctx);
