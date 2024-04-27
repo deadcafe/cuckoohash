@@ -10,11 +10,16 @@ OPTFLAGS := -O3 -march=native -fomit-frame-pointer -fpie -fpic
 
 CFLAGS  = -g $(OPTFLAGS) -Werror -Wextra -Wall -Wstrict-aliasing -std=gnu11 -pipe
 CPPFLAGS = -c -I$(CURDIR) -D_GNU_SOURCE -DENABLE_TRACER -DENABLE_UINIT_TEST
-LIBS = -lpapi
+LIBS =
 LDFLAGS =
 
 #CFLAGS += -funroll-loops -frerun-loop-opt
 #CFLAGS += -fforce-addr
+
+ifdef ENABLE_PAPI
+CPPFLAGS += -DENABLE_PAPI
+LIBS += -lpapi
+endif
 
 ifdef ENABLE_HASH_TRACER
 CPPFLAGS += -DENABLE_HASH_TRACER

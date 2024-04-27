@@ -68,7 +68,8 @@ main(int ac,
                         exit(0);
                 }
         }
-        fprintf(stdout, "Memory size:%zu\n", cuckoo_sizeof(nb));
+        fprintf(stdout, "Memory size:%zu %fMB\n",
+                cuckoo_sizeof(nb), (double)  cuckoo_sizeof(nb)/1024/1024);
         cuckoo_test(nb, ctx_size, do_basic, do_speed_test, do_analyze, do_unit, do_mem, flags);
 
         return 0;

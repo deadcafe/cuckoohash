@@ -8,7 +8,10 @@
 #include <assert.h>
 #include <sched.h>
 #include <unistd.h>
-#include <papi.h>
+
+#if defined(ENABLE_PAPI)
+# include <papi.h>
+#endif
 
 #include "cuckoohash.h"
 
@@ -1096,12 +1099,15 @@ align_pow2 (unsigned v)
  *
  */
 always_inline unsigned
-nb_nodes (unsigned nb_entries)
+nb_nodes (unsigned org)
 {
-        nb_entries = CUCKOO_EFFECTIVE_CAPA(nb_entries);
+        unsigned nb_entries = org;
+
         if (nb_entries < CUCKOO_NB_ENTRIES_MIN)
                 nb_entries = CUCKOO_NB_ENTRIES_MIN;
         nb_entries = align_pow2(nb_entries);
+        if (nb_entries < (org * 16) / 13)
+                nb_entries <<= 1;
 
         TRACER("nb nodes:%u\n", nb_entries);
         return nb_entries;
@@ -2842,9 +2848,15 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
         double add = 0, search = 0;
         unsigned target_num = 256 * 1;
 
+#if defined(ENABLE_PAPI)
+        int ret = PAPI_library_init(PAPI_VER_CURRENT);
+        if (ret < 0) {
+                fprintf(stderr, "Failed to init PAPI lib. %s\n",
+                        PAPI_strerror(ret));
+                return -1;
+        }
         int EventSet = PAPI_NULL;
-        int events[4] = { PAPI_TOT_INS, PAPI_TOT_CYC, PAPI_L1_DCH, PAPI_L1_TCA, };
-        int ret;
+        int events[] = { PAPI_TLB_DM, PAPI_TOT_INS, PAPI_TOT_CYC, };
 
         ret = PAPI_create_eventset(&EventSet);
         if (ret != PAPI_OK) {
@@ -2866,6 +2878,8 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
                         PAPI_strerror(ret));
                 return -1;
         }
+#endif /* PAPI */
+
         for (unsigned i = 0; i < 64; i++) {
                 random_key(key_pp, nb);
                 cuckoo_reset(cuckoo);
@@ -2876,6 +2890,8 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
                 cuckoo->cnt = 0;
                 search += speed_sub_sub(cuckoo, key_pp, target_num);
         }
+
+#if defined(ENABLE_PAPI)
         long long values[4];
         ret = PAPI_stop(EventSet, values);
         if (ret != PAPI_OK) {
@@ -2884,14 +2900,14 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
                 return -1;
         }
         PAPI_shutdown();
+        fprintf(stdout, "IPC:%0.2f %lld\n",
+                (double) values[1] / values[2],
+                values[0]);
+#endif /* PAPI */
 
         fprintf(stdout, "bulk nb:%u add:find %0.2f - %0.2f tsc/key\n",
                 nb,
                 add / 64, search / 64);
-        fprintf(stdout, "IPC:%0.2f L1 hit rate %f %lld %lld\n",
-                (double) values[0] / values[1],
-                (double) values[2] / (double) values[3],
-                values[2], values[3]);
 
         return 0;
 }
@@ -3048,13 +3064,6 @@ cuckoo_test(unsigned nb,
             unsigned flags)
 {
         fprintf(stdout, "nb:%u\n", nb);
-
-        int ret = PAPI_library_init(PAPI_VER_CURRENT);
-        if (ret < 0) {
-                fprintf(stderr, "Failed to init PAPI lib. %s\n",
-                        PAPI_strerror(ret));
-                return -1;
-        }
 
         struct cuckoo_hash_s *cuckoo;
         cuckoo_hash_func_t calk_hash = test_hash;
