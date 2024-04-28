@@ -33,7 +33,8 @@
 #define CUCKOO_PIPELINE_NB	27
 
 
-#define CUCKOO_EFFECTIVE_CAPA(nb)	(((nb) / CUCKOO_BUCKET_ENTRY_SZ) * 13)
+#define CUCKOO_COEF			13
+#define CUCKOO_EFFECTIVE_CAPA(nb)	(((nb) / CUCKOO_BUCKET_ENTRY_SZ) * CUCKOO_COEF)
 
 
 #define CUCKOO_INVALID_HASH64	UINT64_C(-1)	/* -1 : invalid */
@@ -82,12 +83,14 @@ struct cuckoo_key_s {
  *　128 bytes
  */
 struct cuckoo_node_s {
-        struct cuckoo_key_s key _CUCKOO_CACHE_ALIGNED;
+        struct cuckoo_key_s key;
+
         IDXQ_ENTRY(cuckoo_node_s) entry;
         union cuckoo_hash_u hash;
 
 
         /* flow data */
+        uint8_t _d[0] _CUCKOO_CACHE_ALIGNED;
         uint32_t test_id;
         unsigned data[8];
 } _CUCKOO_CACHE_ALIGNED;
