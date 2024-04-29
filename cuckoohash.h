@@ -80,7 +80,7 @@ struct cuckoo_key_s {
 };
 
 /*
- *　128 bytes
+ *　Must be a multiple of CUCKOO_CACHELINE_SIZE
  */
 struct cuckoo_node_s {
         struct cuckoo_key_s key;
@@ -88,12 +88,16 @@ struct cuckoo_node_s {
         IDXQ_ENTRY(cuckoo_node_s) entry;
         union cuckoo_hash_u hash;
 
-
         /* flow data */
         uint8_t _d[0] _CUCKOO_CACHE_ALIGNED;
+
         uint32_t test_id;
-        unsigned data[8];
+#if 1
+        unsigned data[2047];
+#endif
 } _CUCKOO_CACHE_ALIGNED;
+
+
 
 struct cuckoo_hash_s;
 struct idx_pool_s;

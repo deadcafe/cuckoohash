@@ -35,6 +35,13 @@ struct cuckoo_bucket_s {
         uint32_t idx[CUCKOO_BUCKET_ENTRY_SZ];		/* node index */
 };
 
+struct cuckoo_bk_tbl_s {
+        unsigned size;
+        unsigned mask;
+        struct cuckoo_bucket_s *array;
+};
+
+
 /*
  *
  */
@@ -69,15 +76,15 @@ struct cuckoo_find_ctx_s {
         uint64_t hits[2];			/* hval match flags */
 
         union cuckoo_hash_u hash;
-        const struct cuckoo_key_s *fkey_p;
+        const struct cuckoo_key_s *key_p;
         struct cuckoo_node_s **node_pp;
 
-        struct cuckoo_node_s *found_node;
+        struct cuckoo_node_s *found;
         struct cuckoo_node_s *prev;
         struct cuckoo_node_s *next;
 
         unsigned idx;				/* request index */
-        enum cuckoo_find_stage_e stage;		/* */
+        enum cuckoo_find_stage_e stage;		/* next stage */
 };
 
 /*
@@ -94,6 +101,11 @@ struct cuckoo_find_engine_s {
         unsigned req_nb;
         unsigned node_nb;
 };
+
+struct general_s {
+        uint8_t _something[CUCKOO_CACHELINE_SIZE];
+};
+
 
 /*
  * Arch handler
@@ -123,6 +135,9 @@ struct cuckoo_hash_s {
         unsigned opt_flags;
         unsigned reserved;
 
+        unsigned key_len;
+        unsigned node_len;
+
         /* drivers */
         cuckoo_hash_func_t calc_hash;
         find_idx_in_bucket_t find_idx;
@@ -138,7 +153,7 @@ struct cuckoo_hash_s {
         uint64_t tsc;
         uint64_t fails;
 
-        uint64_t bkcnt[3];	/* 0:1st 1:2nd 2:full */
+        uint64_t bkcnt[3];	/* bucket counter 0:1st 1:2nd 2:full */
 
         struct cuckoo_node_q_s used_fifo;
         struct cuckoo_find_engine_s engine _CUCKOO_CACHE_ALIGNED;
@@ -473,13 +488,11 @@ prefetch_node_in_bucket(const struct cuckoo_hash_s *cuckoo,
                         const struct cuckoo_bucket_s *bk,
                         uint64_t hits)
 {
-        if (hits) {
-                unsigned pos = __builtin_ctzll(hits);
+        unsigned pos = __builtin_ctzll(hits);
 
-                for (hits >>= pos; hits; pos++, hits >>= 1) {
-                        if (hits & 1)
-                                fetch_node(cuckoo, bk, pos);
-                }
+        for (hits >>= pos; hits; pos++, hits >>= 1) {
+                if (hits & 1)
+                        fetch_node(cuckoo, bk, pos);
         }
 }
 
@@ -1228,7 +1241,7 @@ find_node_in_bucket(const struct cuckoo_hash_s *cuckoo,
                 pos = __builtin_ctzll(hits);
                 for (hits >>= pos; hits; pos++, hits >>= 1) {
                         if (hits & 1) {
-                                node = fetch_node(cuckoo, bk, pos);
+                                node = node_ptr(cuckoo, bk->idx[pos]);
                                 if (!memcmp(node->key.val.d64, fkey->val.d64,
                                             sizeof(node->key.val.d64))) {
                                         *pos_p = pos;
@@ -1290,7 +1303,7 @@ insert_node(struct cuckoo_hash_s *cuckoo,
         node_idx = idx_pool_alloc(cuckoo);
         if (node_idx != CUCKOO_INVALID_IDX) {
                 set_bucket(bk, pos, node_idx, hash2val(ctx->hash));
-                set_key(node_ptr(cuckoo, node_idx), ctx->fkey_p, ctx->hash);
+                set_key(node_ptr(cuckoo, node_idx), ctx->key_p, ctx->hash);
                 cuckoo->node_init(node_ptr(cuckoo, node_idx));
                 reset_bucket_hits(engine, bk);
 
@@ -1323,9 +1336,9 @@ init_find_engine(struct cuckoo_find_engine_s *engine,
         for (unsigned i = 0; i < engine->ctx_pool_size; i++) {
                 struct cuckoo_find_ctx_s *ctx = &engine->ctx_pool[i];
 
-                ctx->idx = CUCKOO_INVALID_IDX;
+                ctx->idx   = CUCKOO_INVALID_IDX;
                 ctx->stage = CUCKOO_FIND_STAGE_CALCHASH - (i % CUCKOO_PIPELIN_STAGE_NB);
-                ctx->found_node = NULL;
+                ctx->found = NULL;
         }
 }
 
@@ -1333,10 +1346,10 @@ always_inline void
 list_node(struct cuckoo_hash_s *cuckoo,
           struct cuckoo_find_ctx_s *ctx)
 {
-        if (ctx->found_node) {
-               IDXQ_REMOVE(&cuckoo->used_fifo, ctx->found_node, entry);
-               IDXQ_INSERT_HEAD(&cuckoo->used_fifo, ctx->found_node, entry);
-
+        if (ctx->found) {
+               IDXQ_REMOVE(&cuckoo->used_fifo, ctx->found, entry);
+               IDXQ_INSERT_HEAD(&cuckoo->used_fifo, ctx->found, entry);
+               ctx->found = NULL;
 #if 0
                if (ctx->prev)
                        cacheline_flush(ctx->prev);
@@ -1344,8 +1357,6 @@ list_node(struct cuckoo_hash_s *cuckoo,
                if (ctx->next)
                        cacheline_flush(ctx->next);
 #endif
-
-               ctx->found_node = NULL;
         }
 }
 
@@ -1357,7 +1368,7 @@ prefetch_neighbor(const struct cuckoo_hash_s *cuckoo,
                   struct cuckoo_find_ctx_s *ctx,
                   struct cuckoo_node_s *node)
 {
-        ctx->found_node = node;
+        ctx->found = node;
 
         if ((ctx->prev = IDXQ_PREV(&cuckoo->used_fifo, node, entry)) != NULL)
                  prefetch(ctx->prev, 3);
@@ -1393,11 +1404,11 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
         case CUCKOO_FIND_STAGE_CALCHASH:
                 if (engine->next < nb) {
                         ctx->idx     = engine->next++;
-                        ctx->fkey_p  = engine->fkey_pp[ctx->idx];
+                        ctx->key_p   = engine->fkey_pp[ctx->idx];
                         ctx->node_pp = &engine->node_pp[ctx->idx];
 
                         /* calk hash and fetch bucket */
-                        ctx->hash = cuckoo->calc_hash(ctx->fkey_p, cuckoo->bk_mask);
+                        ctx->hash = cuckoo->calc_hash(ctx->key_p, cuckoo->bk_mask);
 
                         /* do prefetch */
                         ctx->bk[0]   = fetch_bucket(cuckoo, hash2idx(cuckoo, ctx->hash, 0));
@@ -1441,7 +1452,7 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
                                 }
 
                                 node = find_node_in_bucket(cuckoo, ctx->bk[i], ctx->hits[i],
-                                                           ctx->fkey_p, &pos);
+                                                           ctx->key_p, &pos);
                                 if (node) {
                                         cuckoo->bkcnt[i] += 1;
 #if 1
@@ -2933,9 +2944,11 @@ speed_test(struct cuckoo_hash_s *cuckoo,
 
        fprintf(stdout, "\n%s start %u\n", __func__, nb);
 
-       ret = speed_sub(cuckoo, key_pp, nb);
-       if (ret)
-               goto end;
+       for (unsigned i = 0; i < 10; i++) {
+               ret = speed_sub(cuckoo, key_pp, nb);
+               if (ret)
+                       goto end;
+       }
 
        cuckoo_dump(cuckoo, stdout, "speed");
 
