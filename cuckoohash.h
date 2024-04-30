@@ -83,7 +83,7 @@ struct cuckoo_key_s {
  *　Must be a multiple of CUCKOO_CACHELINE_SIZE
  */
 struct cuckoo_node_s {
-        struct cuckoo_key_s key;
+        //        struct cuckoo_key_s key;
 
         IDXQ_ENTRY(cuckoo_node_s) entry;
         union cuckoo_hash_u hash;
@@ -92,7 +92,7 @@ struct cuckoo_node_s {
         uint8_t _d[0] _CUCKOO_CACHE_ALIGNED;
 
         uint32_t test_id;
-#if 1
+#if 0
         unsigned data[2047];
 #endif
 } _CUCKOO_CACHE_ALIGNED;
@@ -305,9 +305,9 @@ extern void cuckoo_node_dump(const struct cuckoo_hash_s *cuckoo,
                              const struct cuckoo_node_s *node);
 
 extern void cuckoo_key_dump(const struct cuckoo_hash_s *cuckoo,
-                            const struct cuckoo_key_s *key,
                             FILE *stream,
-                            const char *title);
+                            const char *title,
+                            const struct cuckoo_key_s *key);
 
 extern struct cuckoo_bucket_s *cuckoo_current_bucket(const struct cuckoo_hash_s *cuckoo,
                                                      const struct cuckoo_node_s * node);

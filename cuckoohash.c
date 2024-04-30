@@ -33,6 +33,7 @@
 struct cuckoo_bucket_s {
         uint32_t hval[CUCKOO_BUCKET_ENTRY_SZ];		/* hash value */
         uint32_t idx[CUCKOO_BUCKET_ENTRY_SZ];		/* node index */
+        struct cuckoo_key_s key[CUCKOO_BUCKET_ENTRY_SZ];
 };
 
 struct cuckoo_bk_tbl_s {
@@ -381,34 +382,13 @@ fetch_node(const struct cuckoo_hash_s *cuckoo,
  *
  */
 always_inline struct cuckoo_key_s *
-fetch_bk_key(const struct cuckoo_hash_s *cuckoo,
-             const struct cuckoo_bucket_s *bk,
+fetch_bk_key(struct cuckoo_bucket_s *bk,
              unsigned pos)
 {
-        struct cuckoo_key_s *key;
-        struct cuckoo_node_s *node = node_ptr(cuckoo, bk->idx[pos]);
+        struct cuckoo_key_s *key = &bk->key[pos];
 
-        if (node) {
-                key = &node->key;
-                prefetch(key, 3);
-        } else {
-                key = NULL;
-        }
+        prefetch(key, 3);
         return key;
-}
-
-/*
- *
- */
-always_inline void
-set_key(struct cuckoo_node_s *node,
-        const struct cuckoo_key_s *key,
-        union cuckoo_hash_u hash)
-{
-        if (node) {
-                memcpy(&node->key.val, &key->val, sizeof(key->val));
-                node->hash = hash;
-        }
 }
 
 /*
@@ -426,26 +406,15 @@ fetch_hash(const struct cuckoo_node_s *node)
  *
  */
 always_inline void
-set_bucket(struct cuckoo_bucket_s *bk,
-           unsigned pos,
-           uint32_t node_idx,
-           uint32_t hval)
-{
-        bk->hval[pos] = hval;
-        bk->idx[pos] = node_idx;
-}
-
-/*
- *
- */
-always_inline void
 move_bucket(struct cuckoo_bucket_s *dst,
             unsigned dpos,
             struct cuckoo_bucket_s *src,
             unsigned spos)
 {
+        memcpy(&dst->key[dpos], &src->key[spos], sizeof(dst->key[dpos]));
         dst->hval[dpos] = src->hval[spos];
         dst->idx[dpos] = src->idx[spos];
+
         src->hval[spos] = CUCKOO_INVALID_HVAL;
         src->idx[spos] = CUCKOO_INVALID_IDX;
 }
@@ -491,8 +460,14 @@ prefetch_node_in_bucket(const struct cuckoo_hash_s *cuckoo,
         unsigned pos = __builtin_ctzll(hits);
 
         for (hits >>= pos; hits; pos++, hits >>= 1) {
-                if (hits & 1)
+                if (hits & 1) {
+                        prefetch(&bk->key[pos], 3);
+#if 0
                         fetch_node(cuckoo, bk, pos);
+#else
+                        (void) cuckoo;
+#endif
+                }
         }
 }
 
@@ -1229,21 +1204,21 @@ always_inline struct cuckoo_node_s *
 find_node_in_bucket(const struct cuckoo_hash_s *cuckoo,
                     const struct cuckoo_bucket_s *bk,
                     uint64_t hits,
-                    const struct cuckoo_key_s *fkey,
+                    const struct cuckoo_key_s *key,
                     unsigned *pos_p)
 {
         struct cuckoo_node_s *node = NULL;
         unsigned pos = -1;
 
-        TRACER("bk:%u fkey:%p hits:%"PRIx64"\n", bucket_idx(cuckoo, bk), fkey, hits);
+        TRACER("bk:%u key:%p hits:%"PRIx64"\n", bucket_idx(cuckoo, bk), key, hits);
 
         if (hits) {
                 pos = __builtin_ctzll(hits);
                 for (hits >>= pos; hits; pos++, hits >>= 1) {
                         if (hits & 1) {
                                 node = node_ptr(cuckoo, bk->idx[pos]);
-                                if (!memcmp(node->key.val.d64, fkey->val.d64,
-                                            sizeof(node->key.val.d64))) {
+                                if (!memcmp(bk->key[pos].val.d64, key->val.d64,
+                                            sizeof(key->val.d64))) {
                                         *pos_p = pos;
                                         break;
                                 }
@@ -1270,7 +1245,7 @@ insert_node(struct cuckoo_hash_s *cuckoo,
         uint32_t node_idx = CUCKOO_INVALID_IDX;
 
         TRACER("bk[0]:%u bk[1]:%u hval:%08x\n",
-               bucket_idx(cuckoo, ctx->bk[0].ptr), bucket_idx(cuckoo, ctx->bk[1].ptr),
+               bucket_idx(cuckoo, ctx->bk[0]), bucket_idx(cuckoo, ctx->bk[1]),
                hash2val(ctx->hash));
 
         uint64_t empt[2];
@@ -1302,9 +1277,17 @@ insert_node(struct cuckoo_hash_s *cuckoo,
 
         node_idx = idx_pool_alloc(cuckoo);
         if (node_idx != CUCKOO_INVALID_IDX) {
-                set_bucket(bk, pos, node_idx, hash2val(ctx->hash));
-                set_key(node_ptr(cuckoo, node_idx), ctx->key_p, ctx->hash);
+                /* set bucket */
+                bk->hval[pos] = hash2val(ctx->hash);
+                bk->idx[pos] = node_idx;
+                memcpy(&bk->key[pos], ctx->key_p, sizeof(bk->key[pos]));
+
+                /* set node */
+                node_ptr(cuckoo, node_idx)->hash = ctx->hash;
+
+                /* init node */
                 cuckoo->node_init(node_ptr(cuckoo, node_idx));
+
                 reset_bucket_hits(engine, bk);
 
                 TRACER("node:%u bk:%u pos:%d\n", node_idx, bucket_idx(cuckoo, bk), pos);
@@ -1588,7 +1571,7 @@ cuckoo_init(struct cuckoo_hash_s *cuckoo,
             cuckoo_node_initializer_t node_init,
             unsigned flags)
 {
-        TRACER("cuckoo:%p nb:%u ctx:%u\n", cuckoo, nb, ctx_size);
+        TRACER("cuckoo:%p nb:%u ctx:%u\n", cuckoo, nb, ctx_nb);
 
         if (!ctx_nb)
                 ctx_nb = 1;
@@ -2118,17 +2101,17 @@ cuckoo_flipflop(const struct cuckoo_hash_s *cuckoo,
  */
 void
 cuckoo_key_dump(const struct cuckoo_hash_s *cuckoo,
-                const struct cuckoo_key_s *key,
                 FILE *stream,
-                const char *title)
+                const char *title,
+                const struct cuckoo_key_s *key)
 {
-        char msg[256];
+        char msg[1024];
         unsigned len;
         union cuckoo_hash_u hash = cuckoo_calc_hash(cuckoo, key);
 
-        len = snprintf(msg, sizeof(msg), "%s hval:%08x key:", title,  hash2val(hash));
+        len = snprintf(msg, sizeof(msg), "%s hval:%08x key:", title, hash2val(hash));
         for (unsigned i = 0; i < ARRAYOF(key->val.d32); i++)
-                snprintf(&msg[len], sizeof(msg) - len, "%08x ", key->val.d32[i]);
+                len += snprintf(&msg[len], sizeof(msg) - len, "%08x ", key->val.d32[i]);
         fprintf(stream, "%s\n", msg);
 }
 
@@ -2141,8 +2124,11 @@ cuckoo_node_dump(const struct cuckoo_hash_s *cuckoo,
                  const char *title,
                  const struct cuckoo_node_s *node)
 {
-        fprintf(stream, "%s node:%u\n", title, node_idx(cuckoo, node));
-        cuckoo_key_dump(cuckoo, &node->key, stream, "--->");
+        fprintf(stream, "%s node:%u hash:%08x %08x\n",
+                title, node_idx(cuckoo, node),
+                node->hash.val32[0],
+                node->hash.val32[1]);
+        //        cuckoo_key_dump(cuckoo, &node->key, stream, "--->");
 }
 
 /*
@@ -2172,6 +2158,13 @@ cuckoo_bucket_dump(const struct cuckoo_hash_s *cuckoo,
                 bk->idx[8], bk->idx[9], bk->idx[10], bk->idx[11],
                 bk->idx[12], bk->idx[13], bk->idx[14], bk->idx[15]
                 );
+
+        for (unsigned pos = 0; pos < ARRAYOF(bk->key); pos++) {
+                char msg[256];
+
+                snprintf(msg, sizeof(msg), "bk:%u pos:%2u", bucket_idx(cuckoo, bk), pos);
+                cuckoo_key_dump(cuckoo, stream, msg, &bk->key[pos]);
+        }
 }
 
 /*
@@ -2255,14 +2248,10 @@ cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
 {
         int ret = -1;
         uint32_t idx = node_idx(cuckoo, node);
+        char msg[256];
 
         if (!node) {
                 fprintf(stderr, "node is NULL\n");
-                goto end;
-        }
-
-        if (memcmp(&key->val, &node->key.val, sizeof(key->val))) {
-                fprintf(stderr, "mismatched key. node:%u\n", idx);
                 goto end;
         }
 
@@ -2275,13 +2264,23 @@ cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
                 goto end;
         }
 
+        if (memcmp(&key->val, &cur_bk->key[pos].val, sizeof(key->val))) {
+                snprintf(msg, sizeof(msg), "node:%u current:%u pos:%u",
+                         node_idx(cuckoo,node), bucket_idx(cuckoo, cur_bk), pos);
+                cuckoo_key_dump(cuckoo, stderr, msg, &cur_bk->key[pos]);
+                cuckoo_key_dump(cuckoo, stderr, "key", key);
+                fprintf(stderr, "mismatched key. node:%u\n", idx);
+                goto end;
+        }
+
+
         ano_bk = fetch_cuckoo_another_bucket(cuckoo, cur_bk, pos);
         if (!ano_bk) {
                 fprintf(stderr, "unknown another bucket. node:%u\n", idx);
                 goto end;
         }
 
-        union cuckoo_hash_u hash = cuckoo_calc_hash(cuckoo, &node->key);
+        union cuckoo_hash_u hash = cuckoo_calc_hash(cuckoo, key);
         if (node->hash.val64 != hash.val64) {
                 fprintf(stderr, "mismatched hash. node:%u\n", idx);
                 goto end;
@@ -2442,9 +2441,10 @@ test_hash(const struct cuckoo_key_s *key,
 
         hash.val32[1] = HVAL[v % (mask + 1)];
         hash.val32[0] = v / mask;
-
-        fprintf(stdout, "key:%u mask:%u hash[0]:%u hash[1]:%u xor:%08x\n",
-                v, mask, hash.val32[0], hash.val32[1], hash.val32[0] ^ hash.val32[1]);
+#if 0
+        fprintf(stdout, "%s key:%x mask:%u hash[0]:%08x hash[1]:%08x xor:%08x\n",
+                __func__, v, mask, hash.val32[0], hash.val32[1], hash.val32[0] ^ hash.val32[1]);
+#endif
         return hash;
 }
 
@@ -2553,62 +2553,61 @@ single_add_del_test(struct cuckoo_hash_s *cuckoo,
 
         fprintf(stdout, "\nADD\n");
         struct cuckoo_node_s *node = cuckoo_find_oneshot(cuckoo, key);
-        struct cuckoo_bucket_s *bk_0, *bk_1;
 
         if (node) {
-                fprintf(stdout, "ADD ok\n");
-                if (cuckoo_verify(cuckoo, node, key))
-                        goto end;
+                struct cuckoo_bucket_s *bk_0, *bk_1;
+
+                cuckoo_node_dump(cuckoo, stdout, "ADD ok", node);
+                cuckoo_key_dump(cuckoo, stdout, "ADD ok", key);
 
                 bk_0 = cuckoo_current_bucket(cuckoo, node);
                 bk_1 = cuckoo_another_bucket(cuckoo, node);
 
-                cuckoo_node_dump(cuckoo, stdout, "ADD ok", node);
                 cuckoo_bucket_dump(cuckoo, stdout, "ADD ok current", bk_0);
                 cuckoo_bucket_dump(cuckoo, stdout, "ADD ok another", bk_1);
-                cuckoo_dump(cuckoo, stdout, "ADD ok Cache");
+                cuckoo_dump(cuckoo, stdout, "ADD ok");
 
-                fprintf(stdout, "\nFlipFlop\n");
+                if (cuckoo_verify(cuckoo, node, key)) {
+                        fprintf(stdout, "verify failed on add\n");
+                        goto end;
+                }
+
                 if (cuckoo_flipflop(cuckoo, node)) {
                         fprintf(stdout, "FlipFlop ng\n");
                         goto end;
                 } else {
                         fprintf(stdout, "FlipFlop ok\n");
-                        if (cuckoo_verify(cuckoo, node, key))
+                        if (cuckoo_verify(cuckoo, node, key)) {
+                                fprintf(stdout, "verify failed on FlipFlop\n");
                                 goto end;
-                        ret = 0;
+                        }
                 }
 
-                cuckoo_node_dump(cuckoo, stdout, "FlipFlop", node);
-                cuckoo_bucket_dump(cuckoo, stdout, "FlipFlop current",
-                                   cuckoo_current_bucket(cuckoo, node));
-                cuckoo_bucket_dump(cuckoo, stdout, "FlipFlop another",
-                                   cuckoo_another_bucket(cuckoo, node));
-                cuckoo_dump(cuckoo, stdout, "FlipFlop Cache");
+                bk_0 = cuckoo_current_bucket(cuckoo, node);
+                bk_1 = cuckoo_another_bucket(cuckoo, node);
 
-                fprintf(stdout, "\nSearch\n");
-                struct cuckoo_node_s *n = cuckoo_find_oneshot(cuckoo, key);
+                cuckoo_node_dump(cuckoo, stdout, "After FlipFlop", node);
+                cuckoo_bucket_dump(cuckoo, stdout, "After FlipFlop current", bk_0);
+                cuckoo_bucket_dump(cuckoo, stdout, "After FlipFlop another", bk_1);
+                cuckoo_dump(cuckoo, stdout, "After FlipFlop");
 
-                cuckoo_node_dump(cuckoo, stdout, "Search", n);
-                cuckoo_bucket_dump(cuckoo, stdout, "Search current",
-                                   cuckoo_current_bucket(cuckoo, n));
-                cuckoo_bucket_dump(cuckoo, stdout, "Search another",
-                                   cuckoo_another_bucket(cuckoo, n));
-                cuckoo_dump(cuckoo, stdout, "Search Cache");
+                struct cuckoo_node_s *found = cuckoo_find_oneshot(cuckoo, key);
+                if (node != found) {
+                        fprintf(stderr, "mismatched node.");
+                        goto end;
+                }
 
-                fprintf(stdout, "\nFree\n");
                 cuckoo_del_oneshot(cuckoo, node);
-                cuckoo_node_dump(cuckoo, stdout, "after free", node);
-                cuckoo_bucket_dump(cuckoo, stdout, "after free current", bk_1);
-                cuckoo_bucket_dump(cuckoo, stdout, "after free another", bk_0);
-                cuckoo_dump(cuckoo, stdout, "after free Cache");
+                cuckoo_node_dump(cuckoo, stdout, "After free", node);
+                cuckoo_bucket_dump(cuckoo, stdout, "After free current", bk_1);
+                cuckoo_bucket_dump(cuckoo, stdout, "After free another", bk_0);
+                cuckoo_dump(cuckoo, stdout, "After free Cache");
 
+                ret = 0;
         } else {
                 fprintf(stdout, "ADD ng\n");
-                goto end;
         }
 
-        ret = 0;
  end:
         fprintf(stdout, "\n");
         dump_all(cuckoo);
@@ -3056,7 +3055,6 @@ cuckoo_test(unsigned nb,
         fprintf(stdout, "nb:%u\n", nb);
 
         struct cuckoo_hash_s *cuckoo;
-        cuckoo_hash_func_t calk_hash = test_hash;
 
         cuckoo = cuckoo_create(nb, ctx_size, NULL, NULL, flags);
         cuckoo_dump(cuckoo, stdout, "Cache");
@@ -3064,6 +3062,8 @@ cuckoo_test(unsigned nb,
         struct cuckoo_key_s **key = init_key(cuckoo->nb);
 
         if (do_basic) {
+                cuckoo_hash_func_t calk_hash = test_hash;
+
                 SWAP(calk_hash, cuckoo->calc_hash);
                 if (single_add_del_test(cuckoo, key, nb))
                         goto end;
