@@ -19,7 +19,17 @@
 static void
 usage(const char *prog)
 {
-        fprintf(stderr, "%s [-n nb] [-c ctx_size] [-s] [-l] [-b] [-m]\n", prog);
+        fprintf(stderr,
+                "%s [-n nb] [-c ctx] [-s] [-l] [-b] [-m] [-u] [-g]\n"
+                "-n nb	Number of elements\n"
+                "-c ctx	Number of contexts\n"
+                "-s	Speed Test\n"
+                "-l	No Listing\n"
+                "-b	Basic Test\n"
+                "-m	Memory laytency\n"
+                "-u	Unit Test\n"
+                "-g	Hugepage mode\n"
+                , prog);
 }
 
 int
@@ -33,12 +43,16 @@ main(int ac,
         bool do_unit = false;
         bool do_basic = false;
         bool do_mem = false;
+        bool do_hp = false;
         unsigned ctx_size = 7;	/* 1~8 default:5 */
         unsigned flags = 0;
 
-        while ((opt = getopt(ac, av, "c:n:sluabm")) != -1) {
+        while ((opt = getopt(ac, av, "c:n:sluabmhg")) != -1) {
 
                 switch (opt) {
+                case 'g':
+                        do_hp = true;
+                        break;
                 case 'a':
                         do_analyze = true;
                         break;
@@ -63,6 +77,7 @@ main(int ac,
                 case 'u':
                         do_unit = true;
                         break;
+                case 'h':
                 default:
                         usage(av[0]);
                         exit(0);
@@ -70,7 +85,7 @@ main(int ac,
         }
         fprintf(stdout, "Memory size:%zu %fMB\n",
                 cuckoo_sizeof(nb), (double)  cuckoo_sizeof(nb)/1024/1024);
-        cuckoo_test(nb, ctx_size, do_basic, do_speed_test, do_analyze, do_unit, do_mem, flags);
+        cuckoo_test(nb, ctx_size, do_basic, do_speed_test, do_analyze, do_unit, do_mem, do_hp, flags);
 
         return 0;
 }

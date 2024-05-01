@@ -71,31 +71,23 @@ union cuckoo_hash_u {
 /*
  * 48 + 8 bytes
  */
-struct cuckoo_key_s {
-        union {
-                uint8_t data[48];
-                uint32_t d32[12];
-                uint64_t d64[6 ];
-        } val;
+union cuckoo_key_u {
+        uint8_t data[48];
+        uint32_t d32[12];
+        uint64_t d64[6 ];
 };
 
 /*
  *　Must be a multiple of CUCKOO_CACHELINE_SIZE
  */
 struct cuckoo_node_s {
-        //        struct cuckoo_key_s key;
-
         IDXQ_ENTRY(cuckoo_node_s) entry;
         union cuckoo_hash_u hash;
 
-        /* flow data */
-        uint8_t _d[0] _CUCKOO_CACHE_ALIGNED;
-
-        uint32_t test_id;
-#if 0
-        unsigned data[2047];
+#if defined(KEY_IS_IN_NODE)
+        union cuckoo_key_u key;
 #endif
-} _CUCKOO_CACHE_ALIGNED;
+};
 
 
 
@@ -114,7 +106,7 @@ struct cuckoo_bucket_s;
  * @param mask value
  * @return cuckoo_hash_u 64bit hash value
  */
-typedef union cuckoo_hash_u (*cuckoo_hash_func_t)(const struct cuckoo_key_s *key, uint32_t mask);
+typedef union cuckoo_hash_u (*cuckoo_hash_func_t)(const union cuckoo_key_u *key, uint32_t mask);
 
 /**
  * @brief Function to initialize node
@@ -122,7 +114,7 @@ typedef union cuckoo_hash_u (*cuckoo_hash_func_t)(const struct cuckoo_key_s *key
  * @param node pointer
  * @return void
  */
-typedef void (*cuckoo_node_initializer_t)(struct cuckoo_node_s *);
+typedef int (*cuckoo_node_initializer_t)(struct cuckoo_node_s *, const union cuckoo_key_u *);
 
 
 /**
@@ -221,7 +213,7 @@ extern unsigned cuckoo_del_bulk(struct cuckoo_hash_s *cuckoo,
  * @return Number of nodes searched.
  */
 extern unsigned cuckoo_find_bulk(struct cuckoo_hash_s *cuckoo,
-                                 const struct cuckoo_key_s * const *fkey_pp,
+                                 const union cuckoo_key_u * const *fkey_pp,
                                  unsigned nb,
                                  struct cuckoo_node_s **node_pp);
 
@@ -235,7 +227,7 @@ extern unsigned cuckoo_find_bulk(struct cuckoo_hash_s *cuckoo,
  * @return void
  */
 extern void cuckoo_hash_bulk(struct cuckoo_hash_s *cuckoo,
-                             struct cuckoo_key_s **key_pp,
+                             union cuckoo_key_u **key_pp,
                              unsigned nb);
 
 /**
@@ -258,7 +250,7 @@ extern int cuckoo_walk(struct cuckoo_hash_s *cuckoo,
  */
 static inline struct cuckoo_node_s *
 cuckoo_find_oneshot(struct cuckoo_hash_s *cuckoo,
-                    const struct cuckoo_key_s *fkey_p)
+                    const union cuckoo_key_u *fkey_p)
 {
         struct cuckoo_node_s *node_p = NULL;
 
@@ -279,6 +271,10 @@ cuckoo_del_oneshot(struct cuckoo_hash_s *cuckoo,
 {
         cuckoo_del_bulk(cuckoo, &node, 1);
 }
+
+extern const union cuckoo_key_u *
+cuckoo_key(const struct cuckoo_hash_s *cuckoo,
+           const struct cuckoo_node_s *node);
 
 /************************************************************************************************
  * for debug
@@ -307,7 +303,7 @@ extern void cuckoo_node_dump(const struct cuckoo_hash_s *cuckoo,
 extern void cuckoo_key_dump(const struct cuckoo_hash_s *cuckoo,
                             FILE *stream,
                             const char *title,
-                            const struct cuckoo_key_s *key);
+                            const union cuckoo_key_u *key);
 
 extern struct cuckoo_bucket_s *cuckoo_current_bucket(const struct cuckoo_hash_s *cuckoo,
                                                      const struct cuckoo_node_s * node);
@@ -320,7 +316,7 @@ extern unsigned cuckoo_bk_empty_nb(const struct cuckoo_hash_s *cuckoo,
 
 extern int cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
                          const struct cuckoo_node_s *node,
-                         const struct cuckoo_key_s *key);
+                         const union cuckoo_key_u *key);
 
 extern int cuckoo_test(unsigned nb,
                        unsigned ctx_size,
@@ -329,6 +325,7 @@ extern int cuckoo_test(unsigned nb,
                        bool do_analyze,
                        bool do_unit,
                        bool do_mem,
+                       bool do_hp,
                        unsigned flags);
 
 #endif	/* !_CUCKOOHASH_H_ */
