@@ -77,7 +77,7 @@ struct cuckoo_node_s {
         union cuckoo_hash_u hash;
 
 #if !defined(KEY_IS_IN_BUCKET)
-        uint8_t key[48];
+        uint8_t key[0];
 #endif
 };
 
@@ -161,7 +161,7 @@ extern void cuckoo_reset(struct cuckoo_hash_s *cuckoo);
  * @param nb to the number of nodes.
  * @return size_t
  */
-extern size_t cuckoo_sizeof(unsigned nb);
+extern size_t cuckoo_sizeof(unsigned nb, unsigned ken_len);
 
 /**
  * @brief Number of nodes in use
