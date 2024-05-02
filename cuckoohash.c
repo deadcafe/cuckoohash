@@ -35,8 +35,8 @@
 struct cuckoo_bucket_s {
         uint32_t hval[CUCKOO_BUCKET_ENTRY_SZ];		/* hash value */
         uint32_t idx[CUCKOO_BUCKET_ENTRY_SZ];		/* node index */
-#if !defined(KEY_IS_IN_NODE)
-        union cuckoo_key_u key[CUCKOO_BUCKET_ENTRY_SZ];
+#if defined(KEY_IS_IN_BUCKET)
+        uint8_t key[CUCKOO_BUCKET_ENTRY_SZ][48];
 #endif
 } _CUCKOO_CACHE_ALIGNED;
 
@@ -121,7 +121,7 @@ struct cuckoo_find_ctx_s {
         uint64_t hits[2];			/* hval match flags */
 
         union cuckoo_hash_u hash;
-        const union cuckoo_key_u *key_p;
+        const void *key_p;
         struct cuckoo_node_s **node_pp;
 
         struct cuckoo_node_s *found;
@@ -138,7 +138,7 @@ struct cuckoo_find_ctx_s {
 struct cuckoo_find_engine_s {
         struct cuckoo_find_ctx_s ctx_pool[CUCKOO_PIPELINE_NB] _CUCKOO_CACHE_ALIGNED;
         struct cuckoo_node_s ** node_pp;
-        const union cuckoo_key_u * const * fkey_pp;
+        const void * const * key_pp;
         uint32_t *bk_idx;
 
         unsigned ctx_pool_size;
@@ -213,7 +213,7 @@ struct cuckoo_hash_s {
  *
  ****************************************************************************************************/
 
-#if !defined(ENABLE_TRACER)
+#if defined(ENABLE_TRACER)
 /*
  *
  */
@@ -457,32 +457,32 @@ idx_pool_next_prefetch(const struct cuckoo_hash_s *cuckoo,
         }
 }
 
-#if defined(KEY_IS_IN_NODE)
+#if defined(KEY_IS_IN_BUCKET)
 /*
  *
  */
-always_inline union cuckoo_key_u *
+always_inline uint8_t *
+get_key_in_bucket(const struct cuckoo_hash_s *cuckoo __attribute__((unused)),
+                  struct cuckoo_bucket_s *bk,
+                  unsigned pos)
+{
+        return &bk->key[pos][0];
+}
+#define GET_KEY(cuckoo, bk, pos)	get_key_in_bucket((cuckoo), (bk), (pos))
+#else
+/*
+ *
+ */
+always_inline void *
 get_key_in_node(const struct cuckoo_hash_s *cuckoo,
                 struct cuckoo_bucket_s *bk,
                 unsigned pos)
 {
         struct cuckoo_node_s *node = node_ptr(cuckoo, bk->idx[pos]);
 
-        return &node->key;
+        return &node->key[0];
 }
 #define GET_KEY(cuckoo, bk, pos)	get_key_in_node((cuckoo), (bk), (pos))
-#else
-/*
- *
- */
-always_inline union cuckoo_key_u *
-get_key_in_bucket(const struct cuckoo_hash_s *cuckoo __attribute__((unused)),
-                  struct cuckoo_bucket_s *bk,
-                  unsigned pos)
-{
-        return &bk->key[pos];
-}
-#define GET_KEY(cuckoo, bk, pos)	get_key_in_bucket((cuckoo), (bk), (pos))
 #endif
 
 /*
@@ -490,11 +490,10 @@ get_key_in_bucket(const struct cuckoo_hash_s *cuckoo __attribute__((unused)),
  */
 always_inline int
 cmp_key(const struct cuckoo_hash_s *cuckoo,
-        const union cuckoo_key_u *a,
-        const union cuckoo_key_u *b)
+        const uint8_t *a,
+        const uint8_t *b)
 {
-        (void) cuckoo;
-        return memcmp(a, b, sizeof(*a));
+        return memcmp(a, b, cuckoo->key_len);
 }
 
 /*
@@ -502,11 +501,10 @@ cmp_key(const struct cuckoo_hash_s *cuckoo,
  */
 always_inline void
 copy_key(const struct cuckoo_hash_s *cuckoo,
-         union cuckoo_key_u *dst,
-         const union cuckoo_key_u *src)
+         void *dst,
+         const void *src)
 {
-        (void) cuckoo;
-        memcpy(dst, src, sizeof(*dst));
+        memcpy(dst, src, cuckoo->key_len);
 }
 
 /*
@@ -628,16 +626,19 @@ murmurhash3_32(const uint32_t *blocks,
  *
  */
 static inline union cuckoo_hash_u
-GENERIC_calc_hash(const union cuckoo_key_u *key,
+GENERIC_calc_hash(const void *key,
+                  unsigned key_len,
                   uint32_t mask)
 {
         union cuckoo_hash_u hash;
+        const uint32_t *d32 = key;
+        unsigned size = key_len / sizeof(*d32);
 
         hash.val32[0] = 0;
         hash.val32[1] = 0xdeadbeef;
 
-        for (unsigned i = 0; i < ARRAYOF(key->d32); i+=2) {
-                hash.val32[0] = murmurhash3_32(&key->d32[i], 2, hash.val32[0]);
+        for (unsigned i = 0; i < size; i += 2) {
+                hash.val32[0] = murmurhash3_32(&d32[i], 2, hash.val32[0]);
                 hash.val32[1] = murmurhash3_32(&hash.val32[0], 1, hash.val32[1]);
         }
 
@@ -723,16 +724,19 @@ BUCKET_DRIVER_GENERATE(SSE41);
  *
  */
 static inline union cuckoo_hash_u
-SSE42_calc_hash(const union cuckoo_key_u *key,
+SSE42_calc_hash(const void *key,
+                unsigned len,
                 uint32_t mask)
 {
         union cuckoo_hash_u hash;
+        const uint64_t *d64 = key;
+        unsigned size = len / sizeof(*d64);
 
         hash.val32[0] = 0;
         hash.val32[1] = 0xdeadbeef;
 
-        for (unsigned i = 0; i < ARRAYOF(key->d64); i++) {
-                hash.val32[0] = _mm_crc32_u64(hash.val32[0], key->d64[i]);
+        for (unsigned i = 0; i < size; i++) {
+                hash.val32[0] = _mm_crc32_u64(hash.val32[0], d64[i]);
                 hash.val32[1] = __builtin_bswap32(hash.val32[0]) ^ hash.val32[1];
         }
 
@@ -1132,7 +1136,7 @@ flipflop_bucket(const struct cuckoo_hash_s *cuckoo,
         if (empty) {
                 dst_pos = __builtin_ctzll(empty);
 
-#if !defined(KEY_IS_IN_NODE)
+#if defined(KEY_IS_IN_BUCKET)
                 /* move bucket */
                 copy_key(cuckoo,
                          GET_KEY(cuckoo, dst_bk, dst_pos),
@@ -1206,7 +1210,7 @@ always_inline struct cuckoo_node_s *
 find_node_in_bucket(const struct cuckoo_hash_s *cuckoo,
                     struct cuckoo_bucket_s *bk,
                     uint64_t hits,
-                    const union cuckoo_key_u *key,
+                    const uint8_t *key,
                     unsigned *pos_p)
 {
         struct cuckoo_node_s *node = NULL;
@@ -1218,7 +1222,7 @@ find_node_in_bucket(const struct cuckoo_hash_s *cuckoo,
                 pos = __builtin_ctzll(hits);
                 for (hits >>= pos; hits; pos++, hits >>= 1) {
                         if (hits & 1) {
-                                union cuckoo_key_u *k = GET_KEY(cuckoo, bk, pos);
+                                const uint8_t *k = GET_KEY(cuckoo, bk, pos);
                                 if (!cmp_key(cuckoo, k, key)) {
                                         node = node_ptr(cuckoo, bk->idx[pos]);
                                         *pos_p = pos;
@@ -1278,7 +1282,7 @@ insert_node(struct cuckoo_hash_s *cuckoo,
 
         node_idx = idx_pool_alloc(cuckoo);
         if (node_idx != CUCKOO_INVALID_IDX) {
-                if (cuckoo->node_init(node_ptr(cuckoo, node_idx), ctx->key_p)) {
+                if (cuckoo->node_init(node_ptr(cuckoo, node_idx), ctx->key_p, cuckoo->key_len)) {
                         idx_pool_free(cuckoo, node_idx);
                         TRACER("not inserted node:%u\n", node_idx);
                         node_idx = CUCKOO_INVALID_IDX;
@@ -1309,11 +1313,11 @@ always_inline void
 init_find_engine(struct cuckoo_find_engine_s *engine,
                  unsigned nb,
                  struct cuckoo_node_s **node_pp,
-                 const union cuckoo_key_u * const *fkey_pp,
+                 const void * const *key_pp,
                  unsigned ctx_nb)
 {
         engine->node_pp = node_pp;
-        engine->fkey_pp = fkey_pp;
+        engine->key_pp = key_pp;
         engine->next = 0;
         engine->req_nb = nb;
         engine->node_nb = 0;
@@ -1391,11 +1395,11 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
         case CUCKOO_FIND_STAGE_CALCHASH:
                 if (engine->next < nb) {
                         ctx->idx     = engine->next++;
-                        ctx->key_p   = engine->fkey_pp[ctx->idx];
+                        ctx->key_p   = engine->key_pp[ctx->idx];
                         ctx->node_pp = &engine->node_pp[ctx->idx];
 
                         /* calk hash and fetch bucket */
-                        ctx->hash = cuckoo->calc_hash(ctx->key_p, cuckoo->bk_mask);
+                        ctx->hash = cuckoo->calc_hash(ctx->key_p, cuckoo->key_len, cuckoo->bk_mask);
 
                         /* do prefetch */
                         ctx->bk[0]   = fetch_bucket(cuckoo, hash2idx(cuckoo, ctx->hash, 0));
@@ -1483,7 +1487,7 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
 always_inline unsigned
 find_engine(struct cuckoo_hash_s *cuckoo,
             struct cuckoo_node_s **node_pp,
-            const union cuckoo_key_u * const *fkey_pp,
+            const void * const *key_pp,
             unsigned nb)
 {
         struct cuckoo_find_engine_s *engine = &cuckoo->engine;
@@ -1494,7 +1498,7 @@ find_engine(struct cuckoo_hash_s *cuckoo,
         uint64_t tsc = rdtsc();
         idx_pool_next_prefetch(cuckoo, 1);
 
-        init_find_engine(engine, nb, node_pp, fkey_pp, cuckoo->ctx_nb);
+        init_find_engine(engine, nb, node_pp, key_pp, cuckoo->ctx_nb);
 
         while (nb > cnt) {
                 for (unsigned i = 0; (nb > cnt) && (i < engine->ctx_pool_size); i++) {
@@ -1517,7 +1521,8 @@ find_engine(struct cuckoo_hash_s *cuckoo,
  */
 static int
 null_node_init(struct cuckoo_node_s *node __attribute__((unused)),
-               const union cuckoo_key_u *key __attribute__((unused)))
+               const void *key __attribute__((unused)),
+               unsigned key_len __attribute__((unused)))
 {
         return 0;
 }
@@ -1530,9 +1535,9 @@ null_node_init(struct cuckoo_node_s *node __attribute__((unused)),
  */
 union cuckoo_hash_u
 cuckoo_calc_hash(const struct cuckoo_hash_s *cuckoo,
-                 const union cuckoo_key_u *key)
+                 const void *key)
 {
-        return cuckoo->calc_hash(key, cuckoo->bk_mask);
+        return cuckoo->calc_hash(key, cuckoo->key_len, cuckoo->bk_mask);
 }
 
 /*
@@ -1540,11 +1545,11 @@ cuckoo_calc_hash(const struct cuckoo_hash_s *cuckoo,
  */
 unsigned
 cuckoo_find_bulk(struct cuckoo_hash_s *cuckoo,
-                 const union cuckoo_key_u * const *fkey_pp,
+                 const void * const *key_pp,
                  unsigned nb,
                  struct cuckoo_node_s **node_pp)
 {
-        return find_engine(cuckoo, node_pp, fkey_pp, nb);
+        return find_engine(cuckoo, node_pp, key_pp, nb);
 }
 
 /*
@@ -1568,15 +1573,20 @@ cuckoo_sizeof(unsigned nb)
 /*
  *
  */
-void
+int
 cuckoo_init(struct cuckoo_hash_s *cuckoo,
             unsigned nb,
             unsigned ctx_nb,
             cuckoo_hash_func_t func,
             cuckoo_node_initializer_t node_init,
+            unsigned key_len,
             unsigned flags)
 {
-        TRACER("cuckoo:%p nb:%u ctx:%u\n", cuckoo, nb, ctx_nb);
+        TRACER("cuckoo:%p nb:%u ctx:%u key_len:%u flags:%x\n",
+               cuckoo, nb, ctx_nb, key_len, flags);
+
+        if (key_len % sizeof(uint64_t) || !key_len)
+                return -1;
 
         if (!ctx_nb)
                 ctx_nb = 1;
@@ -1595,6 +1605,7 @@ cuckoo_init(struct cuckoo_hash_s *cuckoo,
         cuckoo->fails = 0;
         cuckoo->is_debug = false;
         cuckoo->opt_flags = flags;
+        cuckoo->key_len = key_len;
 
         if ((ctx_nb * CUCKOO_PIPELIN_STAGE_NB) > ARRAYOF(cuckoo->engine.ctx_pool))
                 cuckoo->ctx_nb = ARRAYOF(cuckoo->engine.ctx_pool) / CUCKOO_PIPELIN_STAGE_NB;
@@ -1637,6 +1648,8 @@ cuckoo_init(struct cuckoo_hash_s *cuckoo,
         IDXQ_INIT(&cuckoo->used_fifo, cuckoo->nodes);
 
         idx_pool_init(cuckoo->idx_pool, node_nb, cuckoo->nodes, &cuckoo->payload[sz]);
+
+        return 0;
 }
 
 /*
@@ -1649,6 +1662,7 @@ cuckoo_reset(struct cuckoo_hash_s *cuckoo)
                     cuckoo->ctx_nb,
                     cuckoo->calc_hash,
                     cuckoo->node_init,
+                    cuckoo->key_len,
                     cuckoo->opt_flags);
 }
 
@@ -1660,14 +1674,19 @@ cuckoo_create(unsigned nb,
               unsigned ctx_nb,
               cuckoo_hash_func_t func,
               cuckoo_node_initializer_t node_init,
+              unsigned key_len,
               unsigned flags)
 {
         TRACER("nb:%u func:%p\n", nb, func);
 
         struct cuckoo_hash_s *cuckoo = aligned_alloc(CUCKOO_CACHELINE_SIZE, cuckoo_sizeof(nb));
 
-        if (cuckoo)
-                cuckoo_init(cuckoo, nb, ctx_nb, func, node_init, flags);
+        if (cuckoo) {
+                if (cuckoo_init(cuckoo, nb, ctx_nb, func, node_init, key_len, flags)) {
+                        free(cuckoo);
+                        cuckoo = NULL;
+                }
+        }
 
         TRACER("cuckoo:%p\n", cuckoo);
         return cuckoo;
@@ -1970,8 +1989,8 @@ enum cuckoo_hash_state_e {
  *
  */
 struct cuckoo_hash_ctx_s {
-        union cuckoo_key_u *key_p;
-        union cuckoo_hash_u hash;
+        const void *key_p;
+        union cuckoo_hash_u *hash_p;
         unsigned idx;
         enum cuckoo_hash_state_e state;
 };
@@ -1983,7 +2002,9 @@ struct cuckoo_hash_engine_s {
         struct cuckoo_hash_ctx_s ctx_pool[28];
 
         cuckoo_hash_func_t calc_hash;
-        union cuckoo_key_u **key_pp;
+        const void * const *key_pp;
+        union cuckoo_hash_u *hash_p;
+        unsigned key_len;
         unsigned mask;
         unsigned next;
 };
@@ -1994,11 +2015,15 @@ struct cuckoo_hash_engine_s {
 always_inline void
 init_hash_engine(struct cuckoo_hash_engine_s *engine,
                  cuckoo_hash_func_t hash_func,
-                 union cuckoo_key_u **key_pp,
-                 unsigned mask)
+                 const void * const *key_pp,
+                 union cuckoo_hash_u *hash_p,
+                 unsigned mask,
+                 unsigned key_len)
 {
         engine->calc_hash = hash_func;
         engine->key_pp = key_pp;
+        engine->hash_p = hash_p;
+        engine->key_len = key_len;
         engine->mask = mask;
         engine->next = 0;
 
@@ -2031,6 +2056,7 @@ do_hash_ctx(struct cuckoo_hash_engine_s *engine,
                 if (engine->next < nb) {
                         ctx->idx = engine->next++;
                         ctx->key_p = engine->key_pp[ctx->idx];
+                        ctx->hash_p = &engine->hash_p[ctx->idx];
                         prefetch(ctx->key_p, 3);
                         ctx->state = CUCKOO_HASH_STATE_CALC;
                 } else {
@@ -2039,7 +2065,7 @@ do_hash_ctx(struct cuckoo_hash_engine_s *engine,
                 break;
 
         case CUCKOO_HASH_STATE_CALC:
-                ctx->hash = engine->calc_hash(ctx->key_p, engine->mask);
+                *(ctx->hash_p) = engine->calc_hash(ctx->key_p, engine->key_len, engine->mask);
                 ctx->state = CUCKOO_HASH_STATE_PREFETCH;
                 done = 1;
                 break;
@@ -2072,12 +2098,13 @@ hash_engine(struct cuckoo_hash_engine_s *engine,
  */
 void
 cuckoo_hash_bulk(struct cuckoo_hash_s *cuckoo,
-                 union cuckoo_key_u **key_pp,
+                 const void * const *key_pp,
+                 union cuckoo_hash_u *hash_p,
                  unsigned nb)
 {
         struct cuckoo_hash_engine_s engine;
 
-        init_hash_engine(&engine, cuckoo->calc_hash, key_pp, cuckoo->bk_mask);
+        init_hash_engine(&engine, cuckoo->calc_hash, key_pp, hash_p, cuckoo->bk_mask, cuckoo->key_len);
         hash_engine(&engine, nb);
 }
 
@@ -2110,15 +2137,16 @@ void
 cuckoo_key_dump(const struct cuckoo_hash_s *cuckoo,
                 FILE *stream,
                 const char *title,
-                const union cuckoo_key_u *key)
+                const void *key)
 {
         char msg[1024];
         unsigned len;
         union cuckoo_hash_u hash = cuckoo_calc_hash(cuckoo, key);
+        const uint8_t *p = key;
 
         len = snprintf(msg, sizeof(msg), "%s hval:%08x key:", title, hash2val(hash));
-        for (unsigned i = 0; i < ARRAYOF(key->d32); i++)
-                len += snprintf(&msg[len], sizeof(msg) - len, "%08x ", key->d32[i]);
+        for (unsigned i = 0; i < cuckoo->key_len; i++)
+                len += snprintf(&msg[len], sizeof(msg) - len, "%02x ", p[i]);
         fprintf(stream, "%s\n", msg);
 }
 
@@ -2135,7 +2163,7 @@ cuckoo_node_dump(const struct cuckoo_hash_s *cuckoo,
                 title, node_idx(cuckoo, node),
                 node->hash.val32[0],
                 node->hash.val32[1]);
-#if defined(KEY_IS_IN_NODE)
+#if !defined(KEY_IS_IN_BUCKET)
         cuckoo_key_dump(cuckoo, stream, "in node", &node->key);
 #endif
 }
@@ -2168,7 +2196,7 @@ cuckoo_bucket_dump(const struct cuckoo_hash_s *cuckoo,
                 bk->idx[12], bk->idx[13], bk->idx[14], bk->idx[15]
                 );
 
-#if !defined(KEY_IS_IN_NODE)
+#if defined(KEY_IS_IN_BUCKET)
         for (unsigned pos = 0; pos < ARRAYOF(bk->key); pos++) {
                 char msg[256];
 
@@ -2252,18 +2280,18 @@ cuckoo_another_bucket(const struct cuckoo_hash_s *cuckoo,
 /*
  *
  */
-const union cuckoo_key_u *
+const void *
 cuckoo_key(const struct cuckoo_hash_s *cuckoo,
            const struct cuckoo_node_s *node)
 {
-#if defined(KEY_IS_IN_NODE)
-        (void) cuckoo;
-        return &node->key;
-#else
+#if defined(KEY_IS_IN_BUCKET)
         unsigned pos = -1;
         struct cuckoo_bucket_s *bk = fetch_cuckoo_current_bucket(cuckoo, node, &pos);
         if (bk)
-                return &bk->key[pos];
+                return &bk->key[pos][0];
+#else
+        (void) cuckoo;
+        return &node->key[0];
 #endif
         return NULL;
 }
@@ -2274,7 +2302,7 @@ cuckoo_key(const struct cuckoo_hash_s *cuckoo,
 int
 cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
               const struct cuckoo_node_s *node,
-              const union cuckoo_key_u *key)
+              const void *key)
 {
         int ret = -1;
         uint32_t idx = node_idx(cuckoo, node);
@@ -2294,7 +2322,7 @@ cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
                 goto end;
         }
 
-        union cuckoo_key_u *k = GET_KEY(cuckoo, cur_bk, pos);
+        const void *k = GET_KEY(cuckoo, cur_bk, pos);
 
         if (cmp_key(cuckoo, k, key)) {
                 snprintf(msg, sizeof(msg), "node:%u current:%u pos:%u",
@@ -2333,22 +2361,32 @@ cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
 /***************************************************************************************************
  * test code
  ***************************************************************************************************/
+/*
+ * 48 + 8 bytes
+ */
+union test_key_u {
+        uint8_t data[48];
+        uint32_t d32[12];
+        uint64_t d64[6 ];
+};
+
 static void
 speed_test_hash_bulk(struct cuckoo_hash_s *cuckoo,
-                     union cuckoo_key_u **key_pp,
+                     union test_key_u **key_pp,
                      unsigned nb)
 {
         uint64_t tsc;
+        union cuckoo_hash_u hash[nb];
 
         cuckoo->calc_hash = GENERIC_calc_hash;
         tsc = rdtsc();
-        cuckoo_hash_bulk(cuckoo, key_pp, nb);
+        cuckoo_hash_bulk(cuckoo, (const void * const *) key_pp, hash, nb);
         tsc = rdtsc() - tsc;
         fprintf(stdout, "Generic bulk hash speed %0.2f tsc/key\n", (double) tsc / nb);
 
         cuckoo->calc_hash = SSE42_calc_hash;
         tsc = rdtsc();
-        cuckoo_hash_bulk(cuckoo, key_pp, nb);
+        cuckoo_hash_bulk(cuckoo, (const void * const *) key_pp, hash, nb);
         tsc = rdtsc() - tsc;
         fprintf(stdout, "SSE42 bulk hash speed %0.2f tsc/key\n", (double) tsc / nb);
 }
@@ -2462,11 +2500,14 @@ static const uint32_t HVAL[] = {
 };
 
 static union cuckoo_hash_u
-test_hash(const union cuckoo_key_u *key,
+test_hash(const void *key,
+          unsigned key_len,
           uint32_t mask)
 {
+        const uint32_t *d32 = key;
         union cuckoo_hash_u hash;
-        uint32_t v = key->d32[0];
+        uint32_t v = d32[0];
+        (void) key_len;
 
         mask = 15;
 
@@ -2480,7 +2521,7 @@ test_hash(const union cuckoo_key_u *key,
 }
 
 static void
-random_key(union cuckoo_key_u **key_pp,
+random_key(union test_key_u **key_pp,
            unsigned nb)
 {
         for (unsigned i = 0; i < nb; i++) {
@@ -2499,13 +2540,13 @@ random_node(struct cuckoo_node_s **node_pp,
         }
 }
 
-static union cuckoo_key_u **
+static union test_key_u **
 init_key(unsigned nb)
 {
-        size_t sz = sizeof(union cuckoo_key_u *) + sizeof(union cuckoo_key_u);
+        size_t sz = sizeof(union test_key_u *) + sizeof(union test_key_u);
 
-        union cuckoo_key_u ** array_p = calloc(nb, sz);
-        union cuckoo_key_u * array = (union cuckoo_key_u *) &array_p[nb];
+        union test_key_u ** array_p = calloc(nb, sz);
+        union test_key_u * array = (union test_key_u *) &array_p[nb];
         for (unsigned i = 0; i < nb; i++)
                 array_p[i] = &array[i];
 
@@ -2520,12 +2561,14 @@ init_key(unsigned nb)
 }
 
 static union cuckoo_hash_u
-same_hash(const union cuckoo_key_u *key,
+same_hash(const void *key,
+          unsigned key_len,
           uint32_t mask)
 {
         union cuckoo_hash_u hash;
         (void) key;
         (void) mask;
+        (void) key_len;
 
         hash.val32[1] = 1;
         hash.val32[0] = 0;
@@ -2575,11 +2618,11 @@ dump_all(struct cuckoo_hash_s *cuckoo)
 
 static int
 single_add_del_test(struct cuckoo_hash_s *cuckoo,
-                    union cuckoo_key_u **key_array,
+                    union test_key_u **key_array,
                     unsigned nb)
 {
         int ret = -1;
-        union cuckoo_key_u *key = key_array[0];
+        union test_key_u *key = key_array[0];
         fprintf(stdout, "\n%s start %u\n\n", __func__, nb);
 
         fprintf(stdout, "\nADD\n");
@@ -2651,7 +2694,7 @@ single_add_del_test(struct cuckoo_hash_s *cuckoo,
  */
 static int
 collision_test(struct cuckoo_hash_s *cuckoo,
-               union cuckoo_key_u **key,
+               union test_key_u **key,
                unsigned nb)
 {
         fprintf(stdout, "\n%s start %u\n", __func__, nb);
@@ -2721,14 +2764,14 @@ verify_cb(struct cuckoo_hash_s *cuckoo,
           void *arg)
 {
         (void) arg;
-        const union cuckoo_key_u *key = cuckoo_key(cuckoo, node);
+        const union test_key_u *key = cuckoo_key(cuckoo, node);
 
         return cuckoo_verify(cuckoo, node, key);
 }
 
 static int
 verify_all(struct cuckoo_hash_s *cuckoo,
-           union cuckoo_key_u **key_pp,
+           union test_key_u **key_pp,
            unsigned nb)
 {
         int ret = -1;
@@ -2748,7 +2791,7 @@ verify_all(struct cuckoo_hash_s *cuckoo,
 
 static int
 max_test(struct cuckoo_hash_s *cuckoo,
-         union cuckoo_key_u **key_pp,
+         union test_key_u **key_pp,
          unsigned nb)
 {
         fprintf(stdout, "\n%s start %u\n", __func__, nb);
@@ -2762,7 +2805,7 @@ max_test(struct cuckoo_hash_s *cuckoo,
 
         /* bulk without hash */
         unsigned n = cuckoo_find_bulk(cuckoo,
-                                      (const union cuckoo_key_u * const *) key_pp,
+                                      (const void * const *) key_pp,
                                       cuckoo->nb, node);
         unsigned count = 0;
         for (unsigned i = 0; i < cuckoo->nb; i++) {
@@ -2792,7 +2835,7 @@ max_test(struct cuckoo_hash_s *cuckoo,
         }
 
         cuckoo->is_debug = false;
-        unsigned m = cuckoo_find_bulk(cuckoo, (const union cuckoo_key_u * const *) key_pp,
+        unsigned m = cuckoo_find_bulk(cuckoo, (const void * const *) key_pp,
                                       cuckoo->nb, n2);
         if (n != m) {
                 fprintf(stdout, "mismatched found keys m:%u n:%u\n", m, n);
@@ -2827,12 +2870,12 @@ max_test(struct cuckoo_hash_s *cuckoo,
 
 static double
 speed_sub_sub(struct cuckoo_hash_s *cuckoo,
-              union cuckoo_key_u **key_pp,
+              union test_key_u **key_pp,
               unsigned nb)
 {
-        union cuckoo_key_u key[256];
+        union test_key_u key[256];
         struct cuckoo_node_s *node[256];
-        union cuckoo_key_u *key_p[256];
+        union test_key_u *key_p[256];
         double tsc = 0;
 
         for (unsigned k = 0; k < ARRAYOF(key); k++)
@@ -2846,7 +2889,7 @@ speed_sub_sub(struct cuckoo_hash_s *cuckoo,
                 for (unsigned k = 0; k < ARRAYOF(key); k++)
                         copy_key(cuckoo, &key[k], key_pp[base + k]);
 
-                num = cuckoo_find_bulk(cuckoo, (const union cuckoo_key_u * const *) key_p,
+                num = cuckoo_find_bulk(cuckoo, (const void * const *) key_p,
                                        ARRAYOF(key), node);
                 if (ARRAYOF(key) != num) {
                         fprintf(stdout, "xxx Failure. num:%u base:%u\n", num, base);
@@ -2860,7 +2903,7 @@ speed_sub_sub(struct cuckoo_hash_s *cuckoo,
 
 static int
 speed_sub(struct cuckoo_hash_s *cuckoo,
-          union cuckoo_key_u **key_pp,
+          union test_key_u **key_pp,
           unsigned nb)
 {
         double add = 0, search = 0;
@@ -2932,7 +2975,7 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
 
 static void
 analyze_ctx_num(struct cuckoo_hash_s *cuckoo,
-                union cuckoo_key_u **key_pp,
+                union test_key_u **key_pp,
                 unsigned nb)
 {
         cuckoo->opt_flags &= ~CUCKOO_DISABLE_FLAG(CUCKOO_DISABLE_LIST);
@@ -2964,7 +3007,7 @@ analyze_ctx_num(struct cuckoo_hash_s *cuckoo,
 
 static int
 speed_test(struct cuckoo_hash_s *cuckoo,
-           union cuckoo_key_u **key_pp,
+           union test_key_u **key_pp,
            unsigned nb)
 {
        int ret = -1;
@@ -3150,13 +3193,13 @@ cuckoo_test(unsigned nb,
         else
                 cuckoo = aligned_alloc(CUCKOO_CACHELINE_SIZE, len);
 
-        cuckoo_init(cuckoo, nb, ctx_size, NULL, NULL, flags);
+        cuckoo_init(cuckoo, nb, ctx_size, NULL, NULL, sizeof(union test_key_u), flags);
         cuckoo_dump(cuckoo, stdout, "Cache");
 
         if (idx_test(cuckoo))
                 goto end;
 
-        union cuckoo_key_u **key = init_key(cuckoo->nb);
+        union test_key_u **key = init_key(cuckoo->nb);
 
         if (do_basic) {
                 cuckoo_hash_func_t calk_hash = test_hash;

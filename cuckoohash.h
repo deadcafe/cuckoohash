@@ -68,14 +68,6 @@ union cuckoo_hash_u {
         uint32_t val32[2];
 };
 
-/*
- * 48 + 8 bytes
- */
-union cuckoo_key_u {
-        uint8_t data[48];
-        uint32_t d32[12];
-        uint64_t d64[6 ];
-};
 
 /*
  *　Must be a multiple of CUCKOO_CACHELINE_SIZE
@@ -84,14 +76,13 @@ struct cuckoo_node_s {
         IDXQ_ENTRY(cuckoo_node_s) entry;
         union cuckoo_hash_u hash;
 
-#if defined(KEY_IS_IN_NODE)
-        union cuckoo_key_u key;
+#if !defined(KEY_IS_IN_BUCKET)
+        uint8_t key[48];
 #endif
 };
 
 
 
-struct cuckoo_hash_s;
 struct idx_pool_s;
 struct cuckoo_bucket_s;
 
@@ -106,15 +97,17 @@ struct cuckoo_bucket_s;
  * @param mask value
  * @return cuckoo_hash_u 64bit hash value
  */
-typedef union cuckoo_hash_u (*cuckoo_hash_func_t)(const union cuckoo_key_u *key, uint32_t mask);
+typedef union cuckoo_hash_u (*cuckoo_hash_func_t)(const void *key, unsigned len, uint32_t mask);
 
 /**
  * @brief Function to initialize node
  *
  * @param node pointer
+ * @param key
+ * @param key_len
  * @return void
  */
-typedef int (*cuckoo_node_initializer_t)(struct cuckoo_node_s *, const union cuckoo_key_u *);
+typedef int (*cuckoo_node_initializer_t)(struct cuckoo_node_s *node, const void *key, unsigned key_len);
 
 
 /**
@@ -124,6 +117,7 @@ typedef int (*cuckoo_node_initializer_t)(struct cuckoo_node_s *, const union cuc
  * @param ctx_size to the context number of pipeline.(1 - 8)
  * @param calc_hash to the hash calculater.
  * @param node_init to the node initialize.
+ * @param key_len to the length of key.
  * @param opt_flags to the functional restriction flag.
  * @return cuckoo_hash_s pointer. Use free when destroying.
  */
@@ -131,6 +125,7 @@ extern struct cuckoo_hash_s *cuckoo_create(unsigned nb,
                                            unsigned ctx_size,
                                            cuckoo_hash_func_t calc_hash,
                                            cuckoo_node_initializer_t node_init,
+                                           unsigned key_len,
                                            unsigned opt_flags);
 
 /**
@@ -141,15 +136,17 @@ extern struct cuckoo_hash_s *cuckoo_create(unsigned nb,
  * @param ctx_size to the context number of pipeline.(1 - 8)
  * @param calc_hash to the hash calculater.
  * @param node_init to the node initialize.
+ * @param key_len to the length of key.
  * @param opt_flags to the functional restriction flag.
- * @return void
+ * @return success then Zero
  */
-extern void cuckoo_init(struct cuckoo_hash_s *cuckoo,
-                        unsigned nb,
-                        unsigned ctx_size,
-                        cuckoo_hash_func_t calc_hash,
-                        cuckoo_node_initializer_t node_init,
-                        unsigned opt_flags);
+extern int cuckoo_init(struct cuckoo_hash_s *cuckoo,
+                       unsigned nb,
+                       unsigned ctx_size,
+                       cuckoo_hash_func_t calc_hash,
+                       cuckoo_node_initializer_t node_init,
+                       unsigned key_len,
+                       unsigned opt_flags);
 /**
  * @brief Reset cucko hashing table.
  *
@@ -213,7 +210,7 @@ extern unsigned cuckoo_del_bulk(struct cuckoo_hash_s *cuckoo,
  * @return Number of nodes searched.
  */
 extern unsigned cuckoo_find_bulk(struct cuckoo_hash_s *cuckoo,
-                                 const union cuckoo_key_u * const *fkey_pp,
+                                 const void * const *key_pp,
                                  unsigned nb,
                                  struct cuckoo_node_s **node_pp);
 
@@ -223,11 +220,13 @@ extern unsigned cuckoo_find_bulk(struct cuckoo_hash_s *cuckoo,
  *
  * @param cuckoo to the hashing table pointer.
  * @param key_pp to the search pointer array.
+ * @param hash_p to the hash array
  * @param nb to the number of keys.
  * @return void
  */
 extern void cuckoo_hash_bulk(struct cuckoo_hash_s *cuckoo,
-                             union cuckoo_key_u **key_pp,
+                             const void * const *key_pp,
+                             union cuckoo_hash_u *hash_p,
                              unsigned nb);
 
 /**
@@ -250,11 +249,11 @@ extern int cuckoo_walk(struct cuckoo_hash_s *cuckoo,
  */
 static inline struct cuckoo_node_s *
 cuckoo_find_oneshot(struct cuckoo_hash_s *cuckoo,
-                    const union cuckoo_key_u *fkey_p)
+                    const void *key_p)
 {
         struct cuckoo_node_s *node_p = NULL;
 
-        cuckoo_find_bulk(cuckoo, &fkey_p, 1, &node_p);
+        cuckoo_find_bulk(cuckoo, &key_p, 1, &node_p);
         return node_p;
 }
 
@@ -272,7 +271,7 @@ cuckoo_del_oneshot(struct cuckoo_hash_s *cuckoo,
         cuckoo_del_bulk(cuckoo, &node, 1);
 }
 
-extern const union cuckoo_key_u *
+extern const void *
 cuckoo_key(const struct cuckoo_hash_s *cuckoo,
            const struct cuckoo_node_s *node);
 
@@ -303,7 +302,7 @@ extern void cuckoo_node_dump(const struct cuckoo_hash_s *cuckoo,
 extern void cuckoo_key_dump(const struct cuckoo_hash_s *cuckoo,
                             FILE *stream,
                             const char *title,
-                            const union cuckoo_key_u *key);
+                            const void *key);
 
 extern struct cuckoo_bucket_s *cuckoo_current_bucket(const struct cuckoo_hash_s *cuckoo,
                                                      const struct cuckoo_node_s * node);
@@ -316,7 +315,7 @@ extern unsigned cuckoo_bk_empty_nb(const struct cuckoo_hash_s *cuckoo,
 
 extern int cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
                          const struct cuckoo_node_s *node,
-                         const union cuckoo_key_u *key);
+                         const void *key);
 
 extern int cuckoo_test(unsigned nb,
                        unsigned ctx_size,
