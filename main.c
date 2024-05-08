@@ -20,7 +20,7 @@ static void
 usage(const char *prog)
 {
         fprintf(stderr,
-                "%s [-n nb] [-c ctx] [-s] [-l] [-b] [-m] [-u] [-g]\n"
+                "%s [-n nb] [-c ctx] [-s] [-l] [-b] [-m] [-u] [-g] [-d]\n"
                 "-n nb	Number of elements\n"
                 "-c ctx	Number of contexts\n"
                 "-s	Speed Test\n"
@@ -29,6 +29,7 @@ usage(const char *prog)
                 "-m	Memory laytency\n"
                 "-u	Unit Test\n"
                 "-g	Hugepage mode\n"
+                "-d	Debug mode\n"
                 , prog);
 }
 
@@ -47,7 +48,7 @@ main(int ac,
         unsigned ctx_size = 7;	/* 1~8 default:5 */
         unsigned flags = 0;
 
-        while ((opt = getopt(ac, av, "c:n:sluabmhg")) != -1) {
+        while ((opt = getopt(ac, av, "c:n:sluabmhgd")) != -1) {
 
                 switch (opt) {
                 case 'g':
@@ -76,6 +77,9 @@ main(int ac,
                         break;
                 case 'u':
                         do_unit = true;
+                        break;
+                case 'd':
+                        flags |= CUCKOO_DISABLE_FLAG(CUCKOO_ENABLE_DEBUG);
                         break;
                 case 'h':
                 default:

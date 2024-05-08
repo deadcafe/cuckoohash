@@ -38,15 +38,16 @@
 
 
 #define CUCKOO_INVALID_HASH64	UINT64_C(-1)	/* -1 : invalid */
-#define CUCKOO_INVALID_HVAL	UINT32_C(-1)
-#define CUCKOO_INVALID_IDX	UINT32_C(-1)	/* -1 : invalid */
+#define CUCKOO_INVALID_HVAL	IDXQ_NULL
+#define CUCKOO_INVALID_IDX	IDXQ_NULL	/* -1 : invalid */
 #define CUCKOO_INVALID_FLAGS	UINT64_C(-1)
 
 /*
  *
  */
 enum cuckoo_opt_e {
-        CUCKOO_DISABLE_SSE41 = 0,
+        CUCKOO_ENABLE_DEBUG = 0,
+        CUCKOO_DISABLE_SSE41,
         CUCKOO_DISABLE_SSE42,
         CUCKOO_DISABLE_AVX2,
         CUCKOO_DISABLE_AVX512,
@@ -107,7 +108,8 @@ typedef union cuckoo_hash_u (*cuckoo_hash_func_t)(const void *key, unsigned len,
  * @param key_len
  * @return void
  */
-typedef int (*cuckoo_node_initializer_t)(struct cuckoo_node_s *node, const void *key, unsigned key_len);
+typedef int (*cuckoo_user_initializer_t)(void *user_data, unsigned user_len,
+                                         const void *key, unsigned key_len);
 
 
 /**
@@ -122,10 +124,12 @@ typedef int (*cuckoo_node_initializer_t)(struct cuckoo_node_s *node, const void 
  * @return cuckoo_hash_s pointer. Use free when destroying.
  */
 extern struct cuckoo_hash_s *cuckoo_create(unsigned nb,
+                                           unsigned key_len,
                                            unsigned ctx_size,
                                            cuckoo_hash_func_t calc_hash,
-                                           cuckoo_node_initializer_t node_init,
-                                           unsigned key_len,
+                                           cuckoo_user_initializer_t user_init,
+                                           void *user_array,
+                                           unsigned user_len,
                                            unsigned opt_flags);
 
 /**
@@ -142,10 +146,12 @@ extern struct cuckoo_hash_s *cuckoo_create(unsigned nb,
  */
 extern int cuckoo_init(struct cuckoo_hash_s *cuckoo,
                        unsigned nb,
+                       unsigned key_len,
                        unsigned ctx_size,
                        cuckoo_hash_func_t calc_hash,
-                       cuckoo_node_initializer_t node_init,
-                       unsigned key_len,
+                       cuckoo_user_initializer_t user_init,
+                       void *user_array,
+                       unsigned user_len,
                        unsigned opt_flags);
 /**
  * @brief Reset cucko hashing table.
@@ -284,10 +290,6 @@ extern int cuckoo_flipflop(const struct cuckoo_hash_s *cuckoo,
 extern void cuckoo_dump(struct cuckoo_hash_s *cuckoo,
                         FILE *stream,
                         const char *title);
-
-extern void cuckoo_idx_pool_dump(const struct idx_pool_s *pool,
-                                 FILE *stream,
-                                 const char *title);
 
 extern void cuckoo_bucket_dump(const struct cuckoo_hash_s *cuckoo,
                                FILE *stream,
