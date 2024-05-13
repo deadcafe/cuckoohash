@@ -2,13 +2,15 @@
  * Copyright(c) 2024 deadcafe.beef@gmail.com. All rights reserved.
  */
 
+#include <bsd/sys/tree.h>
+#include <sys/queue.h>
+#include <sys/mman.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
 #include <sched.h>
 #include <unistd.h>
-#include <sys/mman.h>
 #include <fcntl.h>
 
 #if defined(ENABLE_PAPI)
@@ -16,6 +18,11 @@
 #endif
 
 #include "cuckoohash.h"
+#include "index_queue.h"
+
+#ifndef always_inline
+# define always_inline  static inline __attribute__ ((__always_inline__))
+#endif  /* !always_inline */
 
 #ifndef ARRAYOF
 # define ARRAYOF(_a)     (sizeof(_a)/sizeof(_a[0]))
@@ -42,18 +49,24 @@
 struct cuckoo_bucket_s {
         uint32_t hval[CUCKOO_BUCKET_ENTRY_SZ];		/* hash value */
         uint32_t idx[CUCKOO_BUCKET_ENTRY_SZ];		/* node index */
-#if defined(KEY_IS_IN_BUCKET)
-        uint8_t key[CUCKOO_BUCKET_ENTRY_SZ][48];
-#endif
 } _CUCKOO_CACHE_ALIGNED;
 
 /*
- *
+ * 8 bytes
  */
-struct idx_pool_s {
-        unsigned nb_idx;
-        unsigned nb_used;
-        uint32_t *idx_array;
+union cuckoo_hash_u {
+        uint64_t val64;
+        uint32_t val32[2];
+};
+
+/*
+ *　Must be a multiple of CUCKOO_CACHELINE_SIZE
+ */
+struct cuckoo_node_s {
+        IDXQ_ENTRY(cuckoo_node_s) entry;
+        union cuckoo_hash_u hash;
+
+        uint8_t key[0];
 };
 
 /*
@@ -67,179 +80,6 @@ idx_pool_sizeof(unsigned nb,
 
         size = CEIL_MULTIPLE(size, align);
         return size;
-}
-
-/*
- *
- */
-always_inline void
-idx_pool_init(struct idx_pool_s *idx_pool,
-              unsigned nb,
-              void *idx_array)
-{
-        idx_pool->nb_idx = nb;
-        idx_pool->idx_array = idx_array;
-        idx_pool->nb_used = 0;
-
-        for (uint32_t idx = 0; idx < nb; idx++)
-                idx_pool->idx_array[idx] = idx;
-}
-
-/*
- *
- */
-always_inline uint32_t
-idx_pool_alloc(struct idx_pool_s *idx_pool)
-{
-        uint32_t idx = IDXQ_NULL;
-
-        if (idx_pool->nb_idx > idx_pool->nb_used) {
-                idx = idx_pool->idx_array[idx_pool->nb_used++];
-        }
-        return idx;
-}
-
-/*
- *
- */
-always_inline void
-idx_pool_free(struct idx_pool_s *idx_pool,
-              uint32_t idx)
-{
-        if (idx != IDXQ_NULL) {
-                idx_pool->idx_array[--(idx_pool->nb_used)] = idx;
-        }
-}
-
-/*
- *
- */
-always_inline unsigned
-idx_pool_nb(const struct idx_pool_s *pool)
-{
-        return pool->nb_idx;
-}
-
-/*
- *
- */
-always_inline unsigned
-idx_pool_used(const struct idx_pool_s *pool)
-{
-        return pool->nb_used;
-}
-
-/*
- *
- */
-always_inline int
-idx_pool_dump(const struct idx_pool_s *pool,
-              FILE *stream,
-              const char *title)
-{
-        return fprintf(stream,
-                       "<%s> pool:%p nb:%u used:%u array:%p\n",
-                       title, pool,
-                       pool->nb_idx,
-                       pool->nb_used,
-                       pool->idx_array);
-}
-
-/*
- * index table
- */
-struct idx_tbl_s {
-        unsigned len;	/* unit length */
-        unsigned mask;	/* bit mask */
-        char *base;	/* unit array pointer */
-};
-
-/*
- * index table
- */
-always_inline void
-idx_tbl_init(struct idx_tbl_s *idx_tbl,
-             unsigned len,
-             unsigned mask,
-             void *array)
-{
-        idx_tbl->len = len;
-        idx_tbl->mask = mask;
-        idx_tbl->base = array;
-}
-
-/*
- * length of table element
- */
-always_inline unsigned
-idx_tbl_len(const struct idx_tbl_s *idx_tbl)
-{
-        return idx_tbl->len;
-}
-
-/*
- * element array
- */
-always_inline void *
-idx_tbl_array(const struct idx_tbl_s *idx_tbl)
-{
-        return idx_tbl->base;
-}
-
-/*
- * number of elements (must be 2^n)
- */
-always_inline unsigned
-idx_tbl_nb(const struct idx_tbl_s *idx_tbl)
-{
-        return idx_tbl->mask + 1;
-}
-
-/*
- * array index mask
- */
-always_inline unsigned
-idx_tbl_mask(const struct idx_tbl_s *idx_tbl)
-{
-        return idx_tbl->mask;
-}
-
-/*
- * index to pointer
- */
-always_inline void *
-idx2ptr(const struct idx_tbl_s *idx_tbl,
-        unsigned idx)
-{
-        if (idx == IDXQ_NULL)
-                return NULL;
-        idx &= idx_tbl->mask;
-        return &idx_tbl->base[idx * idx_tbl->len];
-}
-
-/*
- * pointer to index
- */
-always_inline unsigned
-ptr2idx(const struct idx_tbl_s *idx_tbl,
-        const void *ptr)
-{
-        if (!ptr)
-                return IDXQ_NULL;
-        return (((char *) ptr) - idx_tbl->base) / idx_tbl->len;
-}
-
-/*
- * Dump index table elements
- */
-always_inline int
-idx_tbl_dump(const struct idx_tbl_s *tbl,
-             FILE *stream,
-             const char *title)
-{
-        return fprintf(stream, "<%s> tbl:%p len:%u mask:%08x base:%p\n",
-                       title, tbl,
-                       tbl->len, tbl->mask, tbl->base);
 }
 
 /*
@@ -267,7 +107,7 @@ struct cuckoo_find_ctx_s {
 
         union cuckoo_hash_u hash;
         const void *key_p;
-        struct cuckoo_node_s **node_pp;
+        void **user_pp;
 
         struct cuckoo_node_s *found;
         struct cuckoo_node_s *prev;
@@ -282,14 +122,16 @@ struct cuckoo_find_ctx_s {
  */
 struct cuckoo_find_engine_s {
         struct cuckoo_find_ctx_s ctx_pool[CUCKOO_PIPELINE_NB] _CUCKOO_CACHE_ALIGNED;
-        struct cuckoo_node_s ** node_pp;
+        void **user_pp;
         const void * const * key_pp;
         uint32_t *bk_idx;
 
         unsigned ctx_pool_size;
         unsigned next;
         unsigned req_nb;
-        unsigned node_nb;
+        unsigned user_nb;
+        bool enable_add;
+        bool enable_chain;
 };
 
 struct general_s {
@@ -308,8 +150,6 @@ typedef uint64_t (*find_hval_in_bucket_t)(const struct cuckoo_hash_s *,
                                           uint32_t);
 typedef int (*debug_fprintf_t)(FILE *stream, const char *format, ...);
 
-IDXQ_HEAD(cuckoo_node_q_s, cuckoo_node_s);
-
 /*
  * cuckoo_hash_s
  * idx pool
@@ -323,9 +163,9 @@ struct cuckoo_hash_s {
         unsigned _reserved;
 
         /* tables */
-        struct idx_tbl_s node_tbl;
-        struct idx_tbl_s bk_tbl;
-        struct idx_tbl_s user_tbl;
+        IDX_TBL(bk_tbl_s, cuckoo_bucket_s) bk_tbl;
+        IDX_GEN_TBL(node_tbl_s) node_tbl;
+        IDX_GEN_TBL(user_tbl_s) user_tbl;
 
         /* drivers */
         cuckoo_hash_func_t calc_hash;
@@ -333,19 +173,29 @@ struct cuckoo_hash_s {
         find_hval_in_bucket_t find_hval;
         cuckoo_user_initializer_t user_init;
 
-        struct idx_pool_s idx_pool;
-
         uint64_t cnt;
         uint64_t tsc;
         uint64_t fails;
 
         uint64_t bkcnt[3];	/* bucket counter 0:1st 1:2nd 2:full */
 
-        struct cuckoo_node_q_s used_fifo;
+        IDX_POOL(idx_pool_x) idx_pool;
+        IDXQ_HEAD(cuckoo_node_q_s, cuckoo_node_s) used_fifo;
+
         struct cuckoo_find_engine_s engine _CUCKOO_CACHE_ALIGNED;
 
         char payload[] _CUCKOO_CACHE_ALIGNED;
 };
+
+#define BUCKET_PTR(ck, idx)	IDX_TBL_IDX2PTR(&(ck)->bk_tbl, (idx))
+#define BUCKET_IDX(ck, bk)	IDX_TBL_PTR2IDX(&(ck)->bk_tbl, (bk))
+
+#define NODE_PTR(ck, idx)	IDX_GEN_TBL_IDX2PTR(&(ck)->node_tbl, (idx))
+#define NODE_IDX(ck, bk)	IDX_GEN_TBL_PTR2IDX(&(ck)->node_tbl, (bk))
+
+#define USER_PTR(ck, idx)	IDX_GEN_TBL_IDX2PTR(&(ck)->user_tbl, (idx))
+#define USER_IDX(ck, bk)	IDX_GEN_TBL_PTR2IDX(&(ck)->user_tbl, (bk))
+
 
 /****************************************************************************************************
  *
@@ -455,8 +305,9 @@ hash2idx(const struct cuckoo_hash_s *cuckoo,
          const union cuckoo_hash_u hash,
          int even_odd)
 {
-        return (hash.val32[even_odd] & idx_tbl_mask(&cuckoo->bk_tbl));
+        return (hash.val32[even_odd] & IDX_TBL_MASK(&cuckoo->bk_tbl));
 }
+
 
 /*
  *
@@ -465,7 +316,7 @@ always_inline unsigned
 bucket_idx(const struct cuckoo_hash_s *cuckoo,
            const struct cuckoo_bucket_s *bk)
 {
-        return ptr2idx(&cuckoo->bk_tbl, bk);
+        return BUCKET_IDX(cuckoo, bk);
 }
 
 /*
@@ -475,7 +326,7 @@ always_inline struct cuckoo_bucket_s *
 bucket_ptr(const struct cuckoo_hash_s *cuckoo,
            uint32_t idx)
 {
-        return idx2ptr(&cuckoo->bk_tbl, idx);
+        return BUCKET_PTR(cuckoo, idx);
 }
 
 /*
@@ -502,7 +353,7 @@ fetch_cuckoo_another_bucket(const struct cuckoo_hash_s *cuckoo,
                             unsigned pos)
 {
         uint32_t hval = bk->hval[pos];
-        uint32_t idx = ((bucket_idx(cuckoo, bk) ^ hval) & idx_tbl_mask(&cuckoo->bk_tbl));
+        uint32_t idx = ((bucket_idx(cuckoo, bk) ^ hval) & IDX_TBL_MASK(&cuckoo->bk_tbl));
 
         return fetch_bucket(cuckoo, idx);
 }
@@ -514,7 +365,7 @@ always_inline uint32_t
 node_idx(const struct cuckoo_hash_s *cuckoo,
          const struct cuckoo_node_s *node)
 {
-        return ptr2idx(&cuckoo->node_tbl, node);
+        return NODE_IDX(cuckoo, node);
 }
 
 /*
@@ -524,52 +375,43 @@ always_inline struct cuckoo_node_s *
 node_ptr(const struct cuckoo_hash_s *cuckoo,
          uint32_t idx)
 {
-        return idx2ptr(&cuckoo->node_tbl, idx);
+        return NODE_PTR(cuckoo, idx);
+}
+
+
+/*
+ *
+ */
+always_inline uint32_t
+user_idx(const struct cuckoo_hash_s *cuckoo,
+         const void *user)
+{
+        return USER_IDX(cuckoo, user);
+}
+
+/*
+ *
+ */
+always_inline void *
+user_ptr(const struct cuckoo_hash_s *cuckoo,
+         uint32_t idx)
+{
+        return USER_PTR(cuckoo, idx);
 }
 
 /*
  *
  */
 always_inline void
-idx_pool_prefetch(const struct idx_pool_s *pool)
+idx_pool_next_prefetch(const struct cuckoo_hash_s *cuckoo)
 {
-        prefetch(&pool->idx_array[pool->nb_used], 3);
-}
+        unsigned idx;
 
-/*
- *
- */
-always_inline void
-idx_pool_next_prefetch(const struct cuckoo_hash_s *cuckoo,
-                       unsigned nb)
-{
-        const struct idx_pool_s *pool = &cuckoo->idx_pool;
-        unsigned top = pool->nb_used;
-        unsigned tail = top + nb;
-
-        if (tail >= pool->nb_idx)
-                tail = pool->nb_idx;
-
-        for (unsigned i = top; i < tail; i++) {
-                unsigned idx = pool->idx_array[i];
-
+        IDX_POOL_NEXT(&cuckoo->idx_pool, idx);
+        if (idx != IDXQ_NULL)
                 prefetch(node_ptr(cuckoo, idx), 3);
-        }
 }
 
-#if defined(KEY_IS_IN_BUCKET)
-/*
- *
- */
-always_inline uint8_t *
-get_key_in_bucket(const struct cuckoo_hash_s *cuckoo __attribute__((unused)),
-                  struct cuckoo_bucket_s *bk,
-                  unsigned pos)
-{
-        return &bk->key[pos][0];
-}
-#define GET_KEY(cuckoo, bk, pos)	get_key_in_bucket((cuckoo), (bk), (pos))
-#else
 /*
  *
  */
@@ -579,11 +421,9 @@ get_key_in_node(const struct cuckoo_hash_s *cuckoo,
                 unsigned pos)
 {
         struct cuckoo_node_s *node = node_ptr(cuckoo, bk->idx[pos]);
-
         return &node->key[0];
 }
 #define GET_KEY(cuckoo, bk, pos)	get_key_in_node((cuckoo), (bk), (pos))
-#endif
 
 /*
  *
@@ -1160,6 +1000,7 @@ nb_nodes (unsigned org)
 always_inline unsigned
 nb_buckets (unsigned nb_entries)
 {
+        nb_entries = nb_nodes(nb_entries);
         unsigned nb_buckets = nb_entries / CUCKOO_BUCKET_ENTRY_SZ;
 
         TRACER("nb buckets:%u\n", nb_buckets);
@@ -1185,13 +1026,6 @@ flipflop_bucket(const struct cuckoo_hash_s *cuckoo,
         uint64_t empty = cuckoo->find_hval(cuckoo, dst_bk, CUCKOO_INVALID_HVAL);
         if (empty) {
                 dst_pos = __builtin_ctzll(empty);
-
-#if defined(KEY_IS_IN_BUCKET)
-                /* move bucket */
-                copy_key(cuckoo,
-                         GET_KEY(cuckoo, dst_bk, dst_pos),
-                         GET_KEY(cuckoo, src_bk, src_pos));
-#endif
 
                 dst_bk->hval[dst_pos] = src_bk->hval[src_pos];
                 dst_bk->idx[dst_pos] = src_bk->idx[src_pos];
@@ -1331,21 +1165,23 @@ insert_node(struct cuckoo_hash_s *cuckoo,
         }
         TRACER("bk:%u pos:%u\n", bucket_idx(cuckoo, bk), pos);
 
-        node_idx = idx_pool_alloc(&cuckoo->idx_pool);
+        IDX_POOL_ALLOC(&cuckoo->idx_pool, node_idx);
         if (node_idx != CUCKOO_INVALID_IDX) {
-                if (cuckoo->user_init(idx2ptr(&cuckoo->user_tbl, node_idx),
-                                      idx_tbl_len(&cuckoo->user_tbl),
-                                      ctx->key_p, cuckoo->key_len)) {
-                        /* failed to init user data */
-                        idx_pool_free(&cuckoo->idx_pool, node_idx);
+                void *user = user_ptr(cuckoo, node_idx);
 
-                        TRACER("not inserted node:%u\n", node_idx);
+                if (cuckoo->user_init(user, ctx->key_p)) {
+                        /* failed to init user data */
+                        IDX_POOL_FREE(&cuckoo->idx_pool, node_idx);
+
+                        TRACER("not inserted node:%u free\n", node_idx);
                         node_idx = CUCKOO_INVALID_IDX;
                 } else {
                         /* set bucket */
                         bk->hval[pos] = hash2val(ctx->hash);
                         bk->idx[pos] = node_idx;
-                        copy_key(cuckoo, GET_KEY(cuckoo, bk, pos), ctx->key_p);
+
+                        uint8_t *key = GET_KEY(cuckoo, bk, pos);
+                        copy_key(cuckoo, key, ctx->key_p);
 
                         /* set node */
                         node_ptr(cuckoo, node_idx)->hash = ctx->hash;
@@ -1430,11 +1266,11 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
                 if (engine->next < nb) {
                         ctx->idx     = engine->next++;
                         ctx->key_p   = engine->key_pp[ctx->idx];
-                        ctx->node_pp = &engine->node_pp[ctx->idx];
+                        ctx->user_pp = &engine->user_pp[ctx->idx];
 
                         /* calk hash and fetch bucket */
                         ctx->hash = cuckoo->calc_hash(ctx->key_p, cuckoo->key_len,
-                                                      idx_tbl_mask(&cuckoo->bk_tbl));
+                                                      IDX_TBL_MASK(&cuckoo->bk_tbl));
 
                         /* do prefetch */
                         ctx->bk[0]   = fetch_bucket(cuckoo, hash2idx(cuckoo, ctx->hash, 0));
@@ -1491,25 +1327,24 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
                                 }
                         }
 
-                        if (!node) {
-                                node = insert_node(cuckoo, engine, ctx);
-                                if (node) {
-                                        IDXQ_INSERT_HEAD(&cuckoo->used_fifo, node, entry);
-                                }
-                        } else {
-                                if (!CUCKOO_IS_DISABLE(cuckoo->opt_flags, CUCKOO_DISABLE_LIST)) {
-                                        prefetch_neighbor(cuckoo, ctx, node);
-                                }
-                        }
-
-                        *ctx->node_pp = node;
-
                         if (node) {
-                                engine->node_nb += 1;
+                                if (engine->enable_chain)
+                                        prefetch_neighbor(cuckoo, ctx, node);
                         } else {
-                                fprintf(stdout, "xxxxxx\n");
-                                cuckoo->fails += 1;
+                                if (engine->enable_add) {
+                                        node = insert_node(cuckoo, engine, ctx);
+                                        if (node)
+                                                IDXQ_INSERT_HEAD(&cuckoo->used_fifo, node, entry);
+                                        else
+                                                cuckoo->fails += 1;
+                                }
                         }
+
+                        uint32_t idx = node_idx(cuckoo, node);
+
+                        *ctx->user_pp = user_ptr(cuckoo, idx);
+                        if (idx != IDXQ_NULL)
+                                engine->user_nb += 1;
                 }
                 ctx->stage = CUCKOO_FIND_STAGE_CALCHASH;
                 break;
@@ -1524,18 +1359,22 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
 always_inline unsigned
 init_find_engine(struct cuckoo_find_engine_s *engine,
                  unsigned nb,
-                 struct cuckoo_node_s **node_pp,
+                 void **user_pp,
                  const void * const *key_pp,
-                 unsigned ctx_nb)
+                 unsigned ctx_nb,
+                 bool enable_add,
+                 bool enable_chain)
 {
         unsigned alives = 0;
-        engine->node_nb = 0;
+        engine->user_nb = 0;
 
         if (nb) {
-                engine->node_pp = node_pp;
+                engine->user_pp = user_pp;
                 engine->key_pp = key_pp;
                 engine->next = 0;
                 engine->req_nb = nb;
+                engine->enable_add = enable_add;
+                engine->enable_chain = enable_chain;
 
                 engine->ctx_pool_size = CUCKOO_PIPELIN_STAGE_NB * ctx_nb;
 
@@ -1557,9 +1396,11 @@ init_find_engine(struct cuckoo_find_engine_s *engine,
  */
 always_inline unsigned
 find_engine(struct cuckoo_hash_s *cuckoo,
-            struct cuckoo_node_s **node_pp,
+            void **user_pp,
             const void * const *key_pp,
-            unsigned nb)
+            unsigned nb,
+            bool enable_add,
+            bool enable_chain)
 {
         struct cuckoo_find_engine_s *engine = &cuckoo->engine;
         unsigned alives;
@@ -1567,9 +1408,10 @@ find_engine(struct cuckoo_hash_s *cuckoo,
         set_debug_handler(cuckoo);
 
         uint64_t tsc = rdtsc();
-        idx_pool_next_prefetch(cuckoo, 1);
+        idx_pool_next_prefetch(cuckoo);
 
-        alives = init_find_engine(engine, nb, node_pp, key_pp, cuckoo->ctx_nb);
+        alives = init_find_engine(engine, nb, user_pp, key_pp, cuckoo->ctx_nb,
+                                  enable_add, enable_chain);
 
         while (alives) {
                 for (unsigned i = 0; alives && (i < engine->ctx_pool_size); i++) {
@@ -1586,7 +1428,7 @@ find_engine(struct cuckoo_hash_s *cuckoo,
 
         cls_debug_handler(cuckoo);
 
-        return engine->node_nb;
+        return engine->user_nb;
 }
 
 /***************************************************************************************************
@@ -1599,7 +1441,7 @@ union cuckoo_hash_u
 cuckoo_calc_hash(const struct cuckoo_hash_s *cuckoo,
                  const void *key)
 {
-        return cuckoo->calc_hash(key, cuckoo->key_len, idx_tbl_mask(&cuckoo->bk_tbl));
+        return cuckoo->calc_hash(key, cuckoo->key_len, IDX_TBL_MASK(&cuckoo->bk_tbl));
 }
 
 /*
@@ -1609,51 +1451,50 @@ unsigned
 cuckoo_find_bulk(struct cuckoo_hash_s *cuckoo,
                  const void * const *key_pp,
                  unsigned nb,
-                 struct cuckoo_node_s **node_pp)
+                 void **user_pp,
+                 bool enable_add,
+                 bool enable_chain)
 {
-        return find_engine(cuckoo, node_pp, key_pp, nb);
+        return find_engine(cuckoo, user_pp, key_pp, nb, enable_add, enable_chain);
 }
 
+/*
+ *
+ */
 static size_t
 node_tbl_sizeof(unsigned nb,
-                unsigned key_len)
+                unsigned key_len,
+                size_t *element_sz)
 {
         size_t size;
 
-#if defined(KEY_IS_IN_BUCKET)
-        size = sizeof(struct cuckoo_node_s);
-        (void) key_len;
-#else
         size = sizeof(struct cuckoo_node_s) + key_len;
-#endif
-        size *= nb;
-        size = CEIL_MULTIPLE(size, CUCKOO_CACHELINE_SIZE);
+        *element_sz = CEIL_MULTIPLE(size, CUCKOO_CACHELINE_SIZE);
+
+        size = *element_sz * nb;
         return size;
 }
 
+/*
+ *
+ */
 static size_t
 bk_tbl_sizeof(unsigned nb,
-              unsigned key_len)
+              unsigned key_len,
+              size_t *element_sz)
 {
         size_t size;
 
-#if defined(KEY_IS_IN_BUCKET)
-        size = sizeof(struct cuckoo_bucket_s) + (key_len * CUCKOO_BUCKET_ENTRY_SZ);
-#else
         size = sizeof(struct cuckoo_bucket_s);
         (void) key_len;
-#endif
 
-        nb = nb_nodes(nb);
+        *element_sz = CEIL_MULTIPLE(size, CUCKOO_CACHELINE_SIZE);
+
         nb = nb_buckets(nb);
 
-        size *= nb;
-        size = CEIL_MULTIPLE(size, CUCKOO_CACHELINE_SIZE);
-
+        size = *element_sz * nb;
         return size;
 }
-
-
 
 /*
  *
@@ -1662,27 +1503,24 @@ size_t
 cuckoo_sizeof(unsigned nb,
               unsigned key_len)
 {
-        size_t sz = sizeof(struct cuckoo_hash_s);
-        unsigned node_size;
-        unsigned bk_size;
+        size_t hd_sz = sizeof(struct cuckoo_hash_s);
+        size_t node_sz;
+        size_t bk_sz;
+        size_t pool_sz;
+        size_t sz;
+        size_t dummy;
 
-#if defined(KEY_IS_IN_BUCKET)
-        node_size = sizeof(struct cuckoo_node_s);
-        bk_size = sizeof(struct cuckoo_bucket_s) + (key_len * CUCKOO_BUCKET_ENTRY_SZ);
-#else
-        node_size = sizeof(struct cuckoo_node_s) + key_len;
-        bk_size = sizeof(struct cuckoo_bucket_s);
-#endif
-        node_size = CEIL_MULTIPLE(node_size, CUCKOO_CACHELINE_SIZE);
-        bk_size = CEIL_MULTIPLE(bk_size, CUCKOO_CACHELINE_SIZE);
+        node_sz = sizeof(struct cuckoo_node_s) + key_len;
+        bk_sz = sizeof(struct cuckoo_bucket_s);
 
-        nb = nb_nodes(nb);
+        pool_sz = idx_pool_sizeof(nb, CUCKOO_CACHELINE_SIZE);
+        bk_sz = bk_tbl_sizeof(nb, key_len, &dummy);
+        node_sz = node_tbl_sizeof(nb, key_len, &dummy);
 
-        sz += idx_pool_sizeof(nb, CUCKOO_CACHELINE_SIZE);
-        sz += bk_size * nb_buckets(nb);
-        sz += node_size * nb;
+        sz = hd_sz + pool_sz + bk_sz + node_sz;
 
-        TRACER("nb:%u sz:%zu\n", nb, sz);
+        fprintf(stderr, "nb:%u key_len:%u size:%zu hd:%zu pool:%zu bk:%zu node:%zu\n",
+                nb, key_len, sz, hd_sz, pool_sz, bk_sz, node_sz);
         return sz;
 }
 
@@ -1714,23 +1552,6 @@ cuckoo_init(struct cuckoo_hash_s *cuckoo,
         if (!ctx_nb)
                 ctx_nb = 1;
 
-        unsigned node_nb = nb_nodes(nb);
-        unsigned bucket_nb = nb_buckets(node_nb);
-        unsigned node_size;
-        unsigned bk_size;
-
-#if defined(KEY_IS_IN_BUCKET)
-        node_size = sizeof(struct cuckoo_node_s);
-        bk_size = sizeof(struct cuckoo_bucket_s) + (key_len * CUCKOO_BUCKET_ENTRY_SZ);
-#else
-        node_size = sizeof(struct cuckoo_node_s) + key_len;
-        bk_size = sizeof(struct cuckoo_bucket_s);
-#endif
-        node_size = CEIL_MULTIPLE(node_size, 16);
-        bk_size = CEIL_MULTIPLE(bk_size, CUCKOO_CACHELINE_SIZE);
-
-        TRACER("re-size node:%u bucket:%u\n", node_nb, bucket_nb);
-
         cuckoo->cnt = 0;
         cuckoo->tsc = 0;
         cuckoo->fails = 0;
@@ -1760,17 +1581,23 @@ cuckoo_init(struct cuckoo_hash_s *cuckoo,
 
         {
                 /* 1st idx pool */
-                idx_pool_init(&cuckoo->idx_pool, nb, &cuckoo->payload[sz]);
-                sz += idx_pool_sizeof(node_nb, CUCKOO_CACHELINE_SIZE);
+                IDX_POOL_INIT(&cuckoo->idx_pool, (unsigned *) &cuckoo->payload[sz], nb);
+                sz += idx_pool_sizeof(nb, CUCKOO_CACHELINE_SIZE);
         }
 
         {
                 /* 2nd bucket */
                 struct cuckoo_bucket_s *bk = (struct cuckoo_bucket_s *) &cuckoo->payload[sz];
-                size_t size = bk_tbl_sizeof(nb, key_len);
+                size_t bk_size;
+                size_t size = bk_tbl_sizeof(nb, key_len, &bk_size);
+                unsigned bk_nb = nb_buckets(nb);
 
-                memset(bk, -1, size);
-                idx_tbl_init(&cuckoo->bk_tbl, bk_size, bucket_nb - 1, bk);
+                IDX_TBL_INIT(&cuckoo->bk_tbl, bk, bk_nb, bk_nb - 1);
+                for (unsigned i = 0; i < IDX_TBL_NB(&cuckoo->bk_tbl); i++) {
+                        bk = BUCKET_PTR(cuckoo, i);
+                        memset(bk->hval, CUCKOO_INVALID_HVAL, sizeof(bk->hval));
+                        memset(bk->idx, CUCKOO_INVALID_IDX, sizeof(bk->idx));
+                }
 
                 sz += size;
         }
@@ -1778,12 +1605,17 @@ cuckoo_init(struct cuckoo_hash_s *cuckoo,
         {
                 /* 3rd node */
                 struct cuckoo_node_s *node = (struct cuckoo_node_s *) &cuckoo->payload[sz];
-                size_t size = node_tbl_sizeof(nb, key_len);
+                size_t node_sz;
+                size_t size = node_tbl_sizeof(nb, key_len, &node_sz);
+                (void) size;
 
-                memset(node, -1, size);
-                idx_tbl_init(&cuckoo->node_tbl, node_size, node_nb - 1, node);
-                idx_tbl_init(&cuckoo->user_tbl, user_len, node_nb - 1, user_array);
+                IDX_GEN_TBL_INIT(&cuckoo->node_tbl, node, node_sz, nb);
+                for (unsigned i = 0; i < IDX_GEN_TBL_NB(&cuckoo->node_tbl); i++) {
+                        node = node_ptr(cuckoo, i);
+                        node->hash.val64 = CUCKOO_INVALID_HASH64;
+                }
 
+                IDX_GEN_TBL_INIT(&cuckoo->user_tbl, user_array, user_len, nb);
                 IDXQ_INIT(&cuckoo->used_fifo, node);
         }
 
@@ -1803,19 +1635,21 @@ cuckoo_reset(struct cuckoo_hash_s *cuckoo)
         cuckoo->bkcnt[1] = 0;
         cuckoo->bkcnt[2] = 0;
 
-        struct idx_pool_s *pool = &cuckoo->idx_pool;
+        unsigned *pool_array = IDX_POOL_ARRAY(&cuckoo->idx_pool);
+        unsigned pool_nb = IDX_POOL_NB(&cuckoo->idx_pool);
 
-        idx_pool_init(pool, pool->nb_idx, pool->idx_array);
+        IDX_POOL_INIT(&cuckoo->idx_pool, pool_array, pool_nb);
         IDXQ_INIT(&cuckoo->used_fifo, node_ptr(cuckoo, 0));
 
-        for (unsigned i = 0; i < pool->nb_idx; i++) {
+        for (unsigned i = 0; i < IDX_GEN_TBL_NB(&cuckoo->node_tbl); i++) {
                 struct cuckoo_node_s *node = node_ptr(cuckoo, i);
-                memset(node, -1, sizeof(*node));
+                node->hash.val64 = CUCKOO_INVALID_HASH64;
         }
 
-        for (unsigned i = 0; i < idx_tbl_nb(&cuckoo->bk_tbl); i++) {
+        for (unsigned i = 0; i < IDX_TBL_NB(&cuckoo->bk_tbl); i++) {
                 struct cuckoo_bucket_s *bk = bucket_ptr(cuckoo, i);
-                memset(bk, -1, sizeof(*bk));
+                memset(bk->hval, CUCKOO_INVALID_HVAL, sizeof(bk->hval));
+                memset(bk->idx, CUCKOO_INVALID_IDX, sizeof(bk->idx));
         }
 }
 
@@ -1855,7 +1689,7 @@ cuckoo_create(unsigned nb,
 unsigned
 cuckoo_max_node(const struct cuckoo_hash_s *cuckoo)
 {
-        return idx_pool_nb(&cuckoo->idx_pool);
+        return IDX_POOL_NB(&cuckoo->idx_pool);
 }
 
 /*
@@ -1864,7 +1698,7 @@ cuckoo_max_node(const struct cuckoo_hash_s *cuckoo)
 unsigned
 cuckoo_used_num(const struct cuckoo_hash_s *cuckoo)
 {
-        return idx_pool_used(&cuckoo->idx_pool);
+        return IDX_POOL_USED(&cuckoo->idx_pool);
 }
 
 /*
@@ -1873,7 +1707,7 @@ cuckoo_used_num(const struct cuckoo_hash_s *cuckoo)
 unsigned
 cuckoo_empty_num(const struct cuckoo_hash_s *cuckoo)
 {
-        return idx_pool_nb(&cuckoo->idx_pool) - idx_pool_used(&cuckoo->idx_pool);
+        return IDX_POOL_NB(&cuckoo->idx_pool) - IDX_POOL_USED(&cuckoo->idx_pool);
 }
 
 /*
@@ -1881,17 +1715,18 @@ cuckoo_empty_num(const struct cuckoo_hash_s *cuckoo)
  */
 static int
 walk_default(struct cuckoo_hash_s *cuckoo,
-             struct cuckoo_node_s *node,
+             void *user,
              void *arg)
 {
         unsigned *nb_p = arg;
         int ret = 0;
         char title[80];
+        struct cuckoo_node_s * node = node_ptr(cuckoo, user_idx(cuckoo, user));
 
         if (cuckoo_used_num(cuckoo) < *nb_p)
                 ret = -1;
 
-        snprintf(title, sizeof(title), "Walk Node %d", *nb_p);
+        snprintf(title, sizeof(title), "Walk Node %uth", *nb_p);
         cuckoo_node_dump(cuckoo, stdout, title, node);
 
         return ret;
@@ -1902,7 +1737,7 @@ walk_default(struct cuckoo_hash_s *cuckoo,
  */
 int
 cuckoo_walk(struct cuckoo_hash_s *cuckoo,
-            int (*cb_func)(struct cuckoo_hash_s *, struct cuckoo_node_s *, void *),
+            int (*cb_func)(struct cuckoo_hash_s *, void *, void *),
             void *arg)
 {
         struct cuckoo_node_s *node, *next;
@@ -1915,7 +1750,9 @@ cuckoo_walk(struct cuckoo_hash_s *cuckoo,
         }
 
         IDXQ_FOREACH_REVERSE_SAFE(node, &cuckoo->used_fifo, entry, next) {
-                ret = cb_func(cuckoo, node, arg);
+                void *user = user_ptr(cuckoo, node_idx(cuckoo, node));
+
+                ret = cb_func(cuckoo, user, arg);
                 if (ret)
                         goto end;
                 nb += 1;
@@ -1933,15 +1770,14 @@ cuckoo_walk(struct cuckoo_hash_s *cuckoo,
  *
  */
 enum cuckoo_del_state_e {
-        CUCKOO_DEL_STATE_WAIT2,
-        CUCKOO_DEL_STATE_WAIT1,
+        CUCKOO_DEL_STATE_DONE = 0,
+
+        CUCKOO_DEL_STATE_STANDBY_3rd,
+        CUCKOO_DEL_STATE_STANDBY_2th,
 
         CUCKOO_DEL_STATE_PREFETCH_NODE,
         CUCKOO_DEL_STATE_PREFETCH_BK,
         CUCKOO_DEL_STATE_CLEAN,
-
-        CUCKOO_DEL_STATE_DONE,
-        CUCKOO_DEL_STATE_NB,
 };
 
 /*
@@ -1960,7 +1796,7 @@ struct cuckoo_del_ctx_s {
 struct cuckoo_del_engine_s {
         struct cuckoo_del_ctx_s ctx_pool[3 * 5];
 
-        struct cuckoo_node_s **node_pp;
+        void **user_pp;
         unsigned deleted_nb;
         unsigned next;
 };
@@ -1968,11 +1804,13 @@ struct cuckoo_del_engine_s {
 /*
  *
  */
-always_inline void
+always_inline unsigned
 init_del_engine(struct cuckoo_del_engine_s *engine,
-                struct cuckoo_node_s **node_pp)
+                void **user_pp)
 {
-        engine->node_pp = node_pp;
+        unsigned alives = 0;
+
+        engine->user_pp = user_pp;
         engine->deleted_nb = 0;
         engine->next = 0;
 
@@ -1984,13 +1822,15 @@ init_del_engine(struct cuckoo_del_engine_s *engine,
                         ctx->state = CUCKOO_DEL_STATE_PREFETCH_NODE;
                         break;
                 case 1:
-                        ctx->state = CUCKOO_DEL_STATE_WAIT1;
+                        ctx->state = CUCKOO_DEL_STATE_STANDBY_2th;
                         break;
                 case 2:
-                        ctx->state = CUCKOO_DEL_STATE_WAIT2;
+                        ctx->state = CUCKOO_DEL_STATE_STANDBY_3rd;
                         break;
                 }
+                alives |= (1 << i);
         }
+        return alives;
 }
 
 /*
@@ -2005,14 +1845,14 @@ do_del_ctx(struct cuckoo_hash_s *cuckoo,
         unsigned done = 0;
 
         switch (ctx->state) {
-        case CUCKOO_DEL_STATE_WAIT2:
+        case CUCKOO_DEL_STATE_STANDBY_3rd:
                 if (engine->next < nb)
-                        ctx->state = CUCKOO_DEL_STATE_WAIT2;
+                        ctx->state = CUCKOO_DEL_STATE_STANDBY_2th;
                 else
                         ctx->state = CUCKOO_DEL_STATE_DONE;
                 break;
 
-        case CUCKOO_DEL_STATE_WAIT1:
+        case CUCKOO_DEL_STATE_STANDBY_2th:
                 if (engine->next < nb)
                         ctx->state = CUCKOO_DEL_STATE_PREFETCH_NODE;
                 else
@@ -2020,14 +1860,14 @@ do_del_ctx(struct cuckoo_hash_s *cuckoo,
                 break;
 
         case CUCKOO_DEL_STATE_PREFETCH_NODE:
-        retry1:
+        next_data:
                 if (engine->next < nb) {
                         ctx->idx = engine->next++;
-                        ctx->node = engine->node_pp[ctx->idx];
-                        if (!ctx->node) {
-                                done += 1;
-                                goto retry1;
-                        }
+
+                        uint32_t idx = user_idx(cuckoo, engine->user_pp[ctx->idx]);
+                        ctx->node = node_ptr(cuckoo, idx);
+                        if (!ctx->node)
+                                goto next_data;
 
                         prefetch(ctx->node, 3);
                         ctx->state = CUCKOO_DEL_STATE_PREFETCH_BK;
@@ -2063,32 +1903,20 @@ do_del_ctx(struct cuckoo_hash_s *cuckoo,
                         bk = fetch_cuckoo_current_bucket(cuckoo, ctx->node, &pos);
                         if (bk) {
                                 IDXQ_REMOVE(&cuckoo->used_fifo, ctx->node, entry);
+                                ctx->node->hash.val64 = CUCKOO_INVALID_HASH64;
+
                                 bk->idx[pos] = CUCKOO_INVALID_IDX;
                                 bk->hval[pos] = CUCKOO_INVALID_HVAL;
                         }
-                        idx_pool_free(&cuckoo->idx_pool, node_idx(cuckoo, ctx->node));
+                        IDX_POOL_FREE(&cuckoo->idx_pool, node_idx(cuckoo, ctx->node));
                         engine->deleted_nb += 1;
-                        done += 1;
-
-                retry2:
-                        if (engine->next < nb) {
-                                ctx->idx = engine->next++;
-                                ctx->node = engine->node_pp[ctx->idx];
-                                if (!ctx->node) {
-                                        done += 1;
-                                        goto retry2;
-                                }
-
-                                prefetch(ctx->node, 3);
-                                ctx->state = CUCKOO_DEL_STATE_PREFETCH_BK;
-                        } else {
-                                ctx->state = CUCKOO_DEL_STATE_DONE;
-                        }
+                        ctx->state = CUCKOO_DEL_STATE_PREFETCH_NODE;
                 }
                 break;
 
         case CUCKOO_DEL_STATE_DONE:
         default:
+                done = 1;
                 break;
         }
         return done;
@@ -2097,34 +1925,25 @@ do_del_ctx(struct cuckoo_hash_s *cuckoo,
 /*
  *
  */
-always_inline unsigned
-del_engine(struct cuckoo_hash_s *cuckoo,
-           struct cuckoo_del_engine_s *engine,
-           unsigned nb)
-{
-        unsigned done_nb = 0;
-
-        while (nb > done_nb) {
-                for (unsigned i = 0; (nb > done_nb) && (i < ARRAYOF(engine->ctx_pool)); i++) {
-                        done_nb += do_del_ctx(cuckoo, engine, nb, &engine->ctx_pool[i]);
-                }
-        }
-        return engine->deleted_nb;
-}
-
-/*
- *
- */
 unsigned
 cuckoo_del_bulk(struct cuckoo_hash_s *cuckoo,
-                struct cuckoo_node_s **node_pp,
+                void **user_pp,
                 unsigned nb)
 {
         struct cuckoo_del_engine_s engine _CUCKOO_CACHE_ALIGNED;
 
-        init_del_engine(&engine, node_pp);
+        unsigned alives = init_del_engine(&engine, user_pp);
+        while (alives) {
+                for (unsigned i = 0; alives && (i < ARRAYOF(engine.ctx_pool)); i++) {
+                        unsigned mask = (1 << i);
+                        if (alives & mask) {
+                                if (do_del_ctx(cuckoo, &engine, nb, &engine.ctx_pool[i]))
+                                        alives &= ~mask;
+                        }
+                }
+        }
 
-        return del_engine(cuckoo, &engine, nb);
+        return engine.deleted_nb;
 }
 
 /***************************************************************************************************
@@ -2261,7 +2080,7 @@ cuckoo_hash_bulk(struct cuckoo_hash_s *cuckoo,
 {
         struct cuckoo_hash_engine_s engine;
 
-        init_hash_engine(&engine, cuckoo->calc_hash, key_pp, hash_p, idx_tbl_mask(&cuckoo->bk_tbl),
+        init_hash_engine(&engine, cuckoo->calc_hash, key_pp, hash_p, IDX_TBL_MASK(&cuckoo->bk_tbl),
                          cuckoo->key_len);
         hash_engine(&engine, nb);
 }
@@ -2327,9 +2146,7 @@ cuckoo_node_dump(const struct cuckoo_hash_s *cuckoo,
                 title, node_idx(cuckoo, node),
                 node->hash.val32[0],
                 node->hash.val32[1]);
-#if !defined(KEY_IS_IN_BUCKET)
         cuckoo_key_dump(cuckoo, stream, "in node", &node->key);
-#endif
 }
 
 /*
@@ -2359,15 +2176,6 @@ cuckoo_bucket_dump(const struct cuckoo_hash_s *cuckoo,
                 bk->idx[8], bk->idx[9], bk->idx[10], bk->idx[11],
                 bk->idx[12], bk->idx[13], bk->idx[14], bk->idx[15]
                 );
-
-#if defined(KEY_IS_IN_BUCKET)
-        for (unsigned pos = 0; pos < ARRAYOF(bk->key); pos++) {
-                char msg[256];
-
-                snprintf(msg, sizeof(msg), "bk:%u pos:%2u", bucket_idx(cuckoo, bk), pos);
-                cuckoo_key_dump(cuckoo, stream, msg, &bk->key[pos]);
-        }
-#endif
 }
 
 /*
@@ -2397,10 +2205,10 @@ cuckoo_dump(struct cuckoo_hash_s *cuckoo,
                 (double) tsc / cnt,
                 cuckoo->bkcnt[0], cuckoo->bkcnt[1], cuckoo->bkcnt[2]);
 
-        idx_pool_dump(&cuckoo->idx_pool, stream, "idx pool");
-        idx_tbl_dump(&cuckoo->node_tbl, stream, "node tbl");
-        idx_tbl_dump(&cuckoo->bk_tbl, stream, "bk tbl");
-        idx_tbl_dump(&cuckoo->user_tbl, stream, "user tbl");
+        IDX_POOL_DUMP(&cuckoo->idx_pool, stream, "idx pool");
+        IDX_TBL_DUMP(&cuckoo->bk_tbl, stream, "bk tbl");
+        IDX_GEN_TBL_DUMP(&cuckoo->node_tbl, stream, "node tbl");
+        IDX_GEN_TBL_DUMP(&cuckoo->user_tbl, stream, "user tbl");
 }
 
 /*
@@ -2426,29 +2234,34 @@ cuckoo_another_bucket(const struct cuckoo_hash_s *cuckoo,
         if (node) {
                 unsigned pos = -1;
                 uint32_t idx = bucket_idx(cuckoo, fetch_cuckoo_current_bucket(cuckoo, node, &pos));
-                idx = (idx ^ hash2val(node->hash)) & idx_tbl_mask(&cuckoo->bk_tbl);
+                idx = (idx ^ hash2val(node->hash)) & IDX_TBL_MASK(&cuckoo->bk_tbl);
                 bk = bucket_ptr(cuckoo, idx);
         }
         return bk;
 }
 
 /*
- *
+ * Found user data to key.
  */
 const void *
 cuckoo_key(const struct cuckoo_hash_s *cuckoo,
-           const struct cuckoo_node_s *node)
+           const void *user)
 {
-#if defined(KEY_IS_IN_BUCKET)
-        unsigned pos = -1;
-        struct cuckoo_bucket_s *bk = fetch_cuckoo_current_bucket(cuckoo, node, &pos);
-        if (bk)
-                return &bk->key[pos][0];
-#else
-        (void) cuckoo;
+        uint32_t idx = user_idx(cuckoo, user);
+        struct cuckoo_node_s *node = node_ptr(cuckoo, idx);
+
         return &node->key[0];
-#endif
-        return NULL;
+}
+
+/*
+ *
+ */
+struct cuckoo_node_s *
+cuckoo_node(const struct cuckoo_hash_s *cuckoo,
+            const void *user)
+{
+        uint32_t idx = user_idx(cuckoo, user);
+        return node_ptr(cuckoo, idx);
 }
 
 /*
@@ -2456,11 +2269,12 @@ cuckoo_key(const struct cuckoo_hash_s *cuckoo,
  */
 int
 cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
-              const struct cuckoo_node_s *node,
+              const void *user,
               const void *key)
 {
         int ret = -1;
-        uint32_t idx = node_idx(cuckoo, node);
+        struct cuckoo_node_s * node = cuckoo_node(cuckoo, user);
+        unsigned idx = node_idx(cuckoo, node);
         char msg[256];
 
         if (!node) {
@@ -2500,7 +2314,7 @@ cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
                 goto end;
         }
 
-        if (((hash2val(hash) ^ bucket_idx(cuckoo, ano_bk)) & idx_tbl_mask(&cuckoo->bk_tbl)) !=
+        if (((hash2val(hash) ^ bucket_idx(cuckoo, ano_bk)) & IDX_TBL_MASK(&cuckoo->bk_tbl)) !=
             bucket_idx(cuckoo, cur_bk)) {
                 fprintf(stderr, "mismatched bucket index. node:%u\n", idx);
                 goto end;
@@ -2513,9 +2327,212 @@ cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
 }
 
 #if defined(ENABLE_UINIT_TEST)
+
+/***************************************************************************************************
+ * Hugepage memory allocator
+ ***************************************************************************************************/
+struct mem_chunk_s {
+        void *mem;
+
+        unsigned start_bit;
+        unsigned width;
+        TAILQ_ENTRY(mem_chunk_s) entry;
+};
+
+TAILQ_HEAD(mem_chunk_list_s, mem_chunk_s);
+
+struct mem_root_s {
+        void *mem;
+        size_t total_size;
+        size_t block_size;
+
+        struct mem_chunk_list_s used_head;
+        struct mem_chunk_list_s free_head;
+
+        size_t bitmap_nb;
+        size_t total_bits;
+
+        struct mem_chunk_s chunks[64];
+        uint64_t bitmap[0] __attribute__((aligned(64)));
+};
+
+#define BITS_PER_WORD (sizeof(uint64_t) * 8)
+#define SET_BIT(arr, idx) (arr[(idx) / BITS_PER_WORD] |= (UINT64_C(1) << ((idx) % BITS_PER_WORD)))
+#define CLEAR_BIT(arr, idx) (arr[(idx) / BITS_PER_WORD] &= ~(UINT64_C(1) << ((idx) % BITS_PER_WORD)))
+#define IS_BIT_SET(arr, idx) (arr[(idx) / BITS_PER_WORD] & (UINT64_C(1) << ((idx) % BITS_PER_WORD)))
+
+static int
+find_head(uint64_t *bitmap,
+          size_t total_bits,
+          size_t width)
+{
+        fprintf(stderr, "%s:%d bitmap:%p total:%zu width:%zu\n",
+                __func__, __LINE__, bitmap, total_bits, width);
+
+        ssize_t best_start = -1;
+        size_t best_length = 0;
+        ssize_t start = -1;
+        size_t length = 0;
+
+        for (size_t i = 0; i < total_bits; ++i) {
+#if 0
+                fprintf(stderr, "%s:%d i:%zu val:%"PRIx64" start:%zd length:%zu\n",
+                                __func__, __LINE__,
+                        i, bitmap[i / BITS_PER_WORD],
+                        start, length);
+#endif
+
+                if (!IS_BIT_SET(bitmap, i)) {
+                        if (start == -1) {
+                                start = i;
+                        }
+                        length++;
+                } else {
+                        // ビットが埋まっている場合
+                        if (length >= width &&
+                            (length > best_length || best_length == 0)) {
+                                best_start = start;
+                                best_length = length;
+                        }
+                        start = -1;
+                        length = 0;
+                }
+        }
+
+        // 終了時に連続する空き領域があれば最適な値を設定
+        if (length >= width &&
+            (length > best_length || best_length == 0)) {
+                best_start = start;
+        }
+
+        return best_start == -1 ? -1 : best_start;
+}
+
+void *
+TMA_alloc(struct mem_root_s *root,
+          size_t len)
+{
+        fprintf(stderr, "%s:%d len:%zu\n", __func__, __LINE__, len);
+        len = CEIL_MULTIPLE(len, root->block_size);
+        fprintf(stderr, "%s:%d len:%zu\n", __func__, __LINE__, len);
+
+        size_t width = len / root->block_size;
+        int start_bit = find_head(root->bitmap, root->total_bits, width);
+
+        fprintf(stderr, "%s:%d width:%zu start=%d\n", __func__, __LINE__, width, start_bit);
+
+        if (start_bit >= 0) {
+                struct mem_chunk_s *chunk = TAILQ_FIRST(&root->free_head);
+                if (chunk) {
+                        TAILQ_REMOVE(&root->free_head, chunk, entry);
+
+                        chunk->width = width;
+                        chunk->start_bit = start_bit;
+
+                        chunk->mem = ((char *) (root->mem)) + (start_bit * root->block_size);
+                        memset(chunk->mem, 0, len);
+
+                        for (unsigned  i = 0; i < width; i++)
+                                SET_BIT(root->bitmap, i + start_bit);
+
+                        TAILQ_INSERT_TAIL(&root->used_head, chunk, entry);
+
+                        fprintf(stderr, "%s:%d mem:%p\n", __func__, __LINE__, chunk->mem);
+                        return chunk->mem;
+                }
+        }
+        return NULL;
+}
+
+void
+TMA_free(struct mem_root_s *root,
+         void *mem)
+{
+        fprintf(stderr, "%s:%d mem:%p\n", __func__, __LINE__, mem);
+        if (mem) {
+                struct mem_chunk_s *chunk;
+
+                TAILQ_FOREACH(chunk, &root->used_head, entry) {
+                        if (chunk->mem == mem) {
+                                break;
+                        }
+                }
+
+                if (chunk) {
+                        TAILQ_REMOVE(&root->used_head, chunk, entry);
+                        TAILQ_INSERT_TAIL(&root->free_head, chunk, entry);
+
+                        for (unsigned  i = 0; i < chunk->width; i++)
+                                CLEAR_BIT(root->bitmap, i + chunk->start_bit);
+                }
+        }
+}
+
+void
+TMA_destroy(struct mem_root_s *root)
+{
+        if (root) {
+                if (root->mem != MAP_FAILED) {
+                        if (munmap(root->mem, root->total_size) == -1)
+                                perror("munmap");
+                        free(root);
+                }
+        }
+}
+
+/*
+ * Tiny Memory Allocator
+ */
+struct mem_root_s *
+TMA_create(size_t total_size,
+           size_t block_size,
+           bool use_hugepage)
+{
+        total_size = CEIL_MULTIPLE(total_size, block_size);
+
+        size_t total_bits = total_size / block_size;
+        size_t bitmap_nb = total_bits / BITS_PER_WORD;
+
+        struct mem_root_s *root = calloc(1, sizeof(*root) + (sizeof(uint64_t) * bitmap_nb));
+
+        if (root) {
+                int flags =  MAP_PRIVATE | MAP_ANONYMOUS;
+
+                if (use_hugepage)
+                        flags |= MAP_HUGETLB;
+
+                root->mem = mmap(NULL, total_size,
+                                 PROT_READ | PROT_WRITE,
+                                 flags,
+                                 -1, 0);
+
+                if (root->mem == MAP_FAILED) {
+                        TMA_destroy(root);
+                        root = NULL;
+                } else {
+                        fprintf(stdout, "%s:%d total size:%zu block size:%zu nb:%zu bits:%zu mmap:%p\n",
+                                __func__, __LINE__,
+                                total_size, block_size, bitmap_nb, total_bits, root->mem);
+
+                        root->total_size = total_size;
+                        root->block_size = block_size;
+                        root->bitmap_nb = bitmap_nb;
+                        root->total_bits = total_bits;
+
+                        TAILQ_INIT(&root->used_head);
+                        TAILQ_INIT(&root->free_head);
+
+                        for (unsigned i = 0; i < ARRAYOF(root->chunks); i++)
+                                TAILQ_INSERT_TAIL(&root->free_head, &root->chunks[i], entry);
+                }
+        }
+        return root;
+}
+
 /***************************************************************************************************
  * test code
  ***************************************************************************************************/
+
 /*
  * 48 + 8 bytes
  */
@@ -2524,6 +2541,23 @@ union test_key_u {
         uint32_t d32[12];
         uint64_t d64[6 ];
 };
+
+struct user_data_s {
+        const union test_key_u *key;
+        uint64_t something;
+};
+
+static int
+user_data_init(void *p,
+               const void *k)
+{
+        static uint64_t some = 0;
+
+        struct user_data_s *user = p;
+        user->key = k;
+        user->something = some++;
+        return 0;
+}
 
 static void
 speed_test_hash_bulk(struct cuckoo_hash_s *cuckoo,
@@ -2574,26 +2608,19 @@ struct test_s {
 };
 
 static void
-unit_test(void)
+unit_test(struct mem_root_s *mem_root)
 {
-        struct test_s *tbl = aligned_alloc(CUCKOO_CACHELINE_SIZE, sizeof(*tbl));
+        struct test_s *tbl = TMA_alloc(mem_root, sizeof(*tbl));
         if (tbl) {
                 memset(tbl, 0, sizeof(*tbl));
 
                 struct cuckoo_hash_s *cuckoo = &tbl->cuckoo;
                 unsigned key_len = 0;
-#if defined(KEY_IS_IN_BUCKET)
-                unsigned node_size = sizeof(struct cuckoo_node_s);
-                unsigned bk_size = sizeof(struct cuckoo_bucket_s) + (key_len * CUCKOO_BUCKET_ENTRY_SZ);
-#else
                 unsigned node_size = sizeof(struct cuckoo_node_s) + key_len;
-                unsigned bk_size = sizeof(struct cuckoo_bucket_s);
-#endif
 
-
-                idx_pool_init(&cuckoo->idx_pool, ARRAYOF(tbl->idx), tbl->idx);
-                idx_tbl_init(&cuckoo->bk_tbl, bk_size, ARRAYOF(tbl->bk) - 1, tbl->bk);
-                idx_tbl_init(&cuckoo->node_tbl, node_size, ARRAYOF(tbl->node) - 1, tbl->node);
+                IDX_POOL_INIT(&cuckoo->idx_pool, tbl->idx, ARRAYOF(tbl->idx));
+                IDX_TBL_INIT(&cuckoo->bk_tbl, tbl->bk, ARRAYOF(tbl->bk), ARRAYOF(tbl->bk) - 1);
+                IDX_GEN_TBL_INIT(&cuckoo->node_tbl, tbl->node, node_size, ARRAYOF(tbl->node));
 
                 for (unsigned i = 0; i < ARRAYOF(tbl->bk); i++) {
                         struct cuckoo_bucket_s *bk = &tbl->bk[i];
@@ -2652,7 +2679,7 @@ unit_test(void)
                 tsc = rdtsc() - tsc;
                 fprintf(stdout, "AVX2 single speed %0.2f tsc/bk\n", (double) tsc / cnt);
 
-                free(tbl);
+                TMA_free(mem_root, tbl);
         }
 }
 
@@ -2692,21 +2719,22 @@ random_key(union test_key_u **key_pp,
 }
 
 static void
-random_node(struct cuckoo_node_s **node_pp,
+random_user(struct user_data_s **user_pp,
             unsigned nb)
 {
         for (unsigned i = 0; i < nb; i++) {
                 unsigned r = random() % nb;
-                SWAP(node_pp[i], node_pp[r]);
+                SWAP(user_pp[i], user_pp[r]);
         }
 }
 
 static union test_key_u **
-init_key(unsigned nb)
+init_key(struct mem_root_s *mem_root,
+         unsigned nb)
 {
         size_t sz = sizeof(union test_key_u *) + sizeof(union test_key_u);
 
-        union test_key_u ** array_p = calloc(nb, sz);
+        union test_key_u ** array_p = TMA_alloc(mem_root, nb * sz);
         union test_key_u * array = (union test_key_u *) &array_p[nb];
         for (unsigned i = 0; i < nb; i++)
                 array_p[i] = &array[i];
@@ -2739,12 +2767,13 @@ same_hash(const void *key,
 
 static int
 walk_countup(struct cuckoo_hash_s *cuckoo,
-             struct cuckoo_node_s *n,
+             void *user,
              void *arg)
 {
         unsigned *cnt_p = arg;
         char msg[80];
         int ret = 0;
+        struct cuckoo_node_s *n = cuckoo_node(cuckoo, user);
 
         *cnt_p += 1;
         if (*cnt_p > cuckoo_used_num(cuckoo))
@@ -2796,13 +2825,22 @@ single_add_del_test(struct cuckoo_hash_s *cuckoo,
         SWAP(cuckoo->calc_hash, calk_hash);
 
         fprintf(stdout, "\nADD\n");
-        struct cuckoo_node_s *node = cuckoo_find_oneshot(cuckoo, key);
+        struct user_data_s *user = cuckoo_find_oneshot(cuckoo, key, true, true);
 
-        if (node) {
+        if (user) {
                 struct cuckoo_bucket_s *bk_0, *bk_1;
+                struct cuckoo_node_s *node = cuckoo_node(cuckoo, user);
 
-                cuckoo_node_dump(cuckoo, stdout, "ADD ok", node);
-                cuckoo_key_dump(cuckoo, stdout, "ADD ok", key);
+                if (user->key != key) {
+                        fprintf(stdout, "%s:%d mismatched key.\n", __func__, __LINE__);
+                        goto end;
+                }
+                user->key = cuckoo_key(cuckoo, user);
+
+                cuckoo_key_dump(cuckoo, stdout, "input key (ADD ok)", key);
+                cuckoo_key_dump(cuckoo, stdout, "user key (ADD ok)", user->key);
+
+                cuckoo_node_dump(cuckoo, stdout, "node (ADD ok)", node);
 
                 bk_0 = cuckoo_current_bucket(cuckoo, node);
                 bk_1 = cuckoo_another_bucket(cuckoo, node);
@@ -2811,37 +2849,40 @@ single_add_del_test(struct cuckoo_hash_s *cuckoo,
                 cuckoo_bucket_dump(cuckoo, stdout, "ADD ok another", bk_1);
                 cuckoo_dump(cuckoo, stdout, "ADD ok");
 
-                if (cuckoo_verify(cuckoo, node, key)) {
-                        fprintf(stdout, "verify failed on add\n");
+                if (cuckoo_verify(cuckoo, user, key)) {
+                        fprintf(stdout, "%s:%d verify failed on add\n", __func__, __LINE__);
                         goto end;
                 }
 
                 if (cuckoo_flipflop(cuckoo, node)) {
-                        fprintf(stdout, "FlipFlop ng\n");
+                        fprintf(stdout, "%s:%d FlipFlop ng\n", __func__, __LINE__);
                         goto end;
-                } else {
-                        fprintf(stdout, "FlipFlop ok\n");
-                        if (cuckoo_verify(cuckoo, node, key)) {
-                                fprintf(stdout, "verify failed on FlipFlop\n");
-                                goto end;
-                        }
                 }
 
-                bk_0 = cuckoo_current_bucket(cuckoo, node);
-                bk_1 = cuckoo_another_bucket(cuckoo, node);
+                cuckoo_bucket_dump(cuckoo, stdout, "After FlipFlop current",
+                                   cuckoo_current_bucket(cuckoo, node));
+                cuckoo_bucket_dump(cuckoo, stdout, "After FlipFlop another",
+                                   cuckoo_another_bucket(cuckoo, node));
+
+                if (bk_1 != cuckoo_current_bucket(cuckoo, node) ||
+                    bk_0 != cuckoo_another_bucket(cuckoo, node)) {
+                        fprintf(stdout, "%s:%d failed on FlipFlop\n",
+                                __func__, __LINE__);
+                        goto end;
+                }
+                fprintf(stdout, "%s:%d FlipFlop ok\n", __func__, __LINE__);
 
                 cuckoo_node_dump(cuckoo, stdout, "After FlipFlop", node);
-                cuckoo_bucket_dump(cuckoo, stdout, "After FlipFlop current", bk_0);
-                cuckoo_bucket_dump(cuckoo, stdout, "After FlipFlop another", bk_1);
                 cuckoo_dump(cuckoo, stdout, "After FlipFlop");
 
-                struct cuckoo_node_s *found = cuckoo_find_oneshot(cuckoo, key);
-                if (node != found) {
-                        fprintf(stderr, "mismatched node.");
+                struct user_data_s *found = cuckoo_find_oneshot(cuckoo, key, false, false);
+                if (user != found) {
+                        fprintf(stderr, "%s:%d mismatched user.\n", __func__, __LINE__);
                         goto end;
                 }
 
-                cuckoo_del_oneshot(cuckoo, node);
+                cuckoo_del_oneshot(cuckoo, user);
+
                 cuckoo_node_dump(cuckoo, stdout, "After free", node);
                 cuckoo_bucket_dump(cuckoo, stdout, "After free current", bk_1);
                 cuckoo_bucket_dump(cuckoo, stdout, "After free another", bk_0);
@@ -2849,7 +2890,7 @@ single_add_del_test(struct cuckoo_hash_s *cuckoo,
 
                 ret = 0;
         } else {
-                fprintf(stdout, "ADD ng\n");
+                fprintf(stdout, "%s:%d ADD ng\n", __func__, __LINE__);
         }
 
  end:
@@ -2871,66 +2912,66 @@ collision_test(struct cuckoo_hash_s *cuckoo,
         fprintf(stdout, "\n%s start %u\n", __func__, nb);
 
         int ret = -1;
-        struct cuckoo_node_s *node[CUCKOO_BUCKET_ENTRY_SZ + 1];
-        struct cuckoo_bucket_s *bk[2];
+        struct user_data_s *user[CUCKOO_BUCKET_ENTRY_SZ + 1];
+        struct cuckoo_bucket_s *bk[4];
         cuckoo_hash_func_t calk_hash = same_hash;
 
         cuckoo_reset(cuckoo);
         SWAP(cuckoo->calc_hash, calk_hash);
 
-        node[0] = cuckoo_find_oneshot(cuckoo, key[0]);
-        bk[0] = cuckoo_current_bucket(cuckoo, node[0]);
-        bk[1] = cuckoo_another_bucket(cuckoo, node[0]);
-
-        for (unsigned i = 1; i < ARRAYOF(node); i++) {
-                char title[80];
-
-                snprintf(title, sizeof(title), "%u th", i);
-                node[i] = cuckoo_find_oneshot(cuckoo, key[i]);
-                if (!node[i]) {
-                        char msg[80];
-                        snprintf(msg, sizeof(msg), "not found node %u", i);
-
-                        cuckoo_key_dump(cuckoo, stdout, msg, key[i]);
-                        dump_all(cuckoo);
+        for (unsigned i = 0; i < ARRAYOF(user); i++) {
+                user[i] = cuckoo_find_oneshot(cuckoo, key[i], true, true);
+                if (!user[i]) {
+                        fprintf(stdout, "%s:%d failed to ADD %u\n", __func__, __LINE__, i);
                         goto end;
                 }
-                if (bk[0] != cuckoo_current_bucket(cuckoo, node[i]))
-                        cuckoo_flipflop(cuckoo, node[i]);
-
-                cuckoo_bucket_dump(cuckoo, stdout, title, cuckoo_current_bucket(cuckoo, node[i]));
-                if (cuckoo_verify(cuckoo, node[i], key[i]))
+                if (cuckoo_verify(cuckoo, user[i], key[i])) {
+                        fprintf(stdout, "%s:%d failed to verify %u\n", __func__, __LINE__, i);
                         goto end;
+                }
         }
 
-        fprintf(stdout, "nb empty slot cur:%u ano:%u\n",
-                cuckoo_bk_empty_nb(cuckoo, bk[0]), cuckoo_bk_empty_nb(cuckoo, bk[1]));
+        struct cuckoo_node_s *node = cuckoo_node(cuckoo, user[0]);
+        struct cuckoo_node_s *last = cuckoo_node(cuckoo, user[CUCKOO_BUCKET_ENTRY_SZ]);
+        bk[0] = cuckoo_current_bucket(cuckoo, node);
+        bk[1] = cuckoo_another_bucket(cuckoo, node);
+        bk[2] = cuckoo_current_bucket(cuckoo, last);
+        bk[3] = cuckoo_another_bucket(cuckoo, last);
 
-        if (cuckoo_flipflop(cuckoo, node[ARRAYOF(node) - 1]) &&
-            cuckoo_bk_empty_nb(cuckoo, cuckoo_another_bucket(cuckoo, node[ARRAYOF(node) - 1])) == 0) {
-                fprintf(stdout, "failed to filpflop Last (ok)\n");
-        } else {
-                fprintf(stdout, "success to filpflop Last (why)\n");
+        if (0 != cuckoo_bk_empty_nb(cuckoo, bk[0]) ||
+            (CUCKOO_BUCKET_ENTRY_SZ - 1) != cuckoo_bk_empty_nb(cuckoo, bk[1])) {
+                cuckoo_bucket_dump(cuckoo, stdout, "current", bk[0]);
+                cuckoo_bucket_dump(cuckoo, stdout, "another", bk[1]);
+
+                fprintf(stdout, "%s:%d invalid bucket\n", __func__, __LINE__);
                 goto end;
         }
-        if (cuckoo_verify(cuckoo, node[ARRAYOF(node) - 1], key[ARRAYOF(node) - 1]))
-                goto end;
 
-        if (cuckoo_flipflop(cuckoo, node[0])) {
-                fprintf(stdout, "failed to filpflop Top (ng)\n");
+        if (bk[0] != bk[3] || bk[1] != bk[2]) {
+                fprintf(stdout, "%s:%d mismatched bk0123: %u %u %u %u\n",
+                        __func__, __LINE__,
+                        bucket_idx(cuckoo, bk[0]),
+                        bucket_idx(cuckoo, bk[1]),
+                        bucket_idx(cuckoo, bk[2]),
+                        bucket_idx(cuckoo, bk[3]));
                 goto end;
         }
-        if (cuckoo_verify(cuckoo, node[0], key[0]))
-                goto end;
-        if (cuckoo_flipflop(cuckoo, node[ARRAYOF(node) - 1])) {
-                fprintf(stdout, "failed to filpflop Last (ng)\n");
+
+        if (!cuckoo_flipflop(cuckoo, last)) {
+                fprintf(stdout, "%s:%d Must be failed FlipFlop.\n", __func__, __LINE__);
                 goto end;
         }
-        if (cuckoo_verify(cuckoo, node[ARRAYOF(node) - 1], key[ARRAYOF(node) - 1]))
+        if (cuckoo_flipflop(cuckoo, node)) {
+                fprintf(stdout, "%s:%d failed FlipFlop.\n", __func__, __LINE__);
                 goto end;
+        }
+        if (cuckoo_flipflop(cuckoo, last)) {
+                 fprintf(stdout, "%s:%d failed FlipFlop.\n", __func__, __LINE__);
+                goto end;
+        }
 
-        cuckoo_bucket_dump(cuckoo, stdout, "current Top", cuckoo_current_bucket(cuckoo, node[0]));
-        cuckoo_bucket_dump(cuckoo, stdout, "another Top", cuckoo_another_bucket(cuckoo, node[0]));
+        cuckoo_bucket_dump(cuckoo, stdout, "current", cuckoo_current_bucket(cuckoo, node));
+        cuckoo_bucket_dump(cuckoo, stdout, "another", cuckoo_another_bucket(cuckoo, node));
 
         ret = 0;
  end:
@@ -2947,18 +2988,18 @@ struct verify_s {
 
 static int
 verify_cb(struct cuckoo_hash_s *cuckoo,
-          struct cuckoo_node_s *node,
+          void *user,
           void *arg)
 {
         struct verify_s *verify = arg;
+        const union test_key_u *key = cuckoo_key(cuckoo, user);
 
-        const union test_key_u *key = cuckoo_key(cuckoo, node);
         if (memcmp(key, verify->key_pp[verify->idx], cuckoo->key_len)) {
                 fprintf(stderr, "%s:%d mismatched key %u\n",
                         __func__, __LINE__, verify->idx);
                 return -1;
         }
-        fprintf(stderr, "%s:%d Ok %u\n", __func__, __LINE__, verify->idx);
+        TRACER("Ok %u\n", verify->idx);
 
         verify->idx += 1;
         return 0;
@@ -2976,7 +3017,7 @@ verify_all(struct cuckoo_hash_s *cuckoo,
         arg.idx = 0;
 
         if (cuckoo_walk(cuckoo, verify_cb, &arg)) {
-                fprintf(stderr, "Bad walk\n");
+                fprintf(stderr, "%s:%d Bad walk\n", __func__, __LINE__);
                 goto end;
         }
         fprintf(stderr, "%s:%d walk ok.\n", __func__, __LINE__);
@@ -2992,15 +3033,16 @@ verify_all(struct cuckoo_hash_s *cuckoo,
 }
 
 static int
-max_test(struct cuckoo_hash_s *cuckoo,
+max_test(struct mem_root_s *mem_root,
+         struct cuckoo_hash_s *cuckoo,
          union test_key_u **key_pp,
          unsigned nb)
 {
         fprintf(stdout, "\n%s start %u\n", __func__, nb);
 
         int ret = -1;
-        struct cuckoo_node_s **node = calloc(idx_tbl_nb(&cuckoo->node_tbl), sizeof(*node));
-        struct cuckoo_node_s **n2 = calloc(idx_tbl_nb(&cuckoo->node_tbl), sizeof(*n2));
+        struct user_data_s **user = TMA_alloc(mem_root, nb * sizeof(*user));
+        struct user_data_s **n2 = TMA_alloc(mem_root, nb * sizeof(*n2));
 
         cuckoo_reset(cuckoo);
         cuckoo->cnt = 0;
@@ -3009,10 +3051,10 @@ max_test(struct cuckoo_hash_s *cuckoo,
         /* bulk without hash */
         unsigned n = cuckoo_find_bulk(cuckoo,
                                       (const void * const *) key_pp,
-                                      nb, node);
+                                      nb, (void **) user, true, true);
         unsigned count = 0;
         for (unsigned i = 0; i < nb; i++) {
-                if (node[i]) {
+                if (user[i]) {
                         count++;
                 }
         }
@@ -3029,9 +3071,8 @@ max_test(struct cuckoo_hash_s *cuckoo,
         cuckoo_dump(cuckoo, stdout, "Bulk ");
 
 
-
         if (verify_all(cuckoo, key_pp, count)) {
-                fprintf(stdout, "Error\n");
+                fprintf(stdout, "%s:%u verify failed\n", __func__, __LINE__);
                 goto end;
         }
 
@@ -3042,22 +3083,22 @@ max_test(struct cuckoo_hash_s *cuckoo,
         }
 
         unsigned m = cuckoo_find_bulk(cuckoo, (const void * const *) key_pp,
-                                      nb, n2);
+                                      nb, (void **) n2, true, true);
         if (n != m) {
                 fprintf(stdout, "mismatched found keys m:%u n:%u\n", m, n);
                 goto end;
         }
         for (unsigned i = 0; i < nb; i++) {
-                if (node[i] != n2[i]) {
+                if (user[i] != n2[i]) {
                         fprintf(stdout, "mismatched node %u\n", i);
                         goto end;
                 }
         }
 
         fprintf(stdout, "start free\n");
-        random_node(node, idx_tbl_nb(&cuckoo->node_tbl));
+        random_user(user, nb);
         uint64_t tsc = rdtsc();
-        unsigned del_nb = cuckoo_del_bulk(cuckoo, node, idx_tbl_nb(&cuckoo->node_tbl));
+        unsigned del_nb = cuckoo_del_bulk(cuckoo, (void **) user, nb);
         if (del_nb != m) {
                 fprintf(stdout, "mismatched deleted m:%u del:%u\n", m, del_nb);
                 goto end;
@@ -3068,8 +3109,8 @@ max_test(struct cuckoo_hash_s *cuckoo,
  end:
         cuckoo_dump(cuckoo, stdout, "Last dump");
         fprintf(stdout, "%s:%d ret:%d\n\n", __func__, __LINE__, ret);
-        free(node);
-        free(n2);
+        TMA_free(mem_root, user);
+        TMA_free(mem_root, n2);
         return ret;
 }
 
@@ -3079,7 +3120,7 @@ speed_sub_sub(struct cuckoo_hash_s *cuckoo,
               unsigned nb)
 {
         union test_key_u key[256];
-        struct cuckoo_node_s *node[256];
+        struct user_data_s *user[256];
         union test_key_u *key_p[256];
         double tsc = 0;
 
@@ -3095,7 +3136,7 @@ speed_sub_sub(struct cuckoo_hash_s *cuckoo,
                         copy_key(cuckoo, &key[k], key_pp[base + k]);
 
                 num = cuckoo_find_bulk(cuckoo, (const void * const *) key_p,
-                                       ARRAYOF(key), node);
+                                       ARRAYOF(key), (void **) user, true, true);
                 if (ARRAYOF(key) != num) {
                         fprintf(stdout, "xxx Failure. num:%u base:%u\n", num, base);
                         goto end;
@@ -3225,7 +3266,7 @@ speed_test(struct cuckoo_hash_s *cuckoo,
        if (!nb)
                goto end;
 
-       for (unsigned i = 0; i < 10; i++) {
+       for (unsigned i = 0; i < 4; i++) {
                ret = speed_sub(cuckoo, key_pp, nb);
                if (ret)
                        goto end;
@@ -3263,23 +3304,25 @@ measure_chunk(const struct cacheline_s *lines,
 }
 
 static int
-measure_cache_clear(unsigned nb_lines)
+measure_cache_clear(struct mem_root_s *mem_root,
+                    unsigned nb_lines)
 {
-        struct cacheline_s *lines = aligned_alloc(CACHELINE_SIZE, sizeof(*lines) * nb_lines);
+        struct cacheline_s *lines = TMA_alloc(mem_root, sizeof(*lines) * nb_lines);
         int ret = -1;
         if (lines) {
                 for (unsigned i = 0; i < nb_lines; i++)
                         lines[i].val[0] = i;
                 ret = 0;
-                free(lines);
+                TMA_free(mem_root, lines);
         }
         return ret;
 }
 
 static int
-measure_latency(unsigned nb_lines)
+measure_latency(struct mem_root_s *mem_root,
+                unsigned nb_lines)
 {
-        struct cacheline_s *lines = aligned_alloc(CACHELINE_SIZE, sizeof(*lines) * nb_lines);
+        struct cacheline_s *lines = TMA_alloc(mem_root, sizeof(*lines) * nb_lines);
         int ret = -1;
 
         if (lines) {
@@ -3290,7 +3333,7 @@ measure_latency(unsigned nb_lines)
                         lines[i].val[0] = i;
                 }
 
-                if (measure_cache_clear(262144 * 1.5))
+                if (measure_cache_clear(mem_root, 262144 * 1.5))
                         goto end;
 
                 for (unsigned i = 0; i < ARRAYOF(index); i++)
@@ -3303,93 +3346,39 @@ measure_latency(unsigned nb_lines)
                        total_cycles / ARRAYOF(index));
                 ret = 0;
         end:
-                free(lines);
+                TMA_free(mem_root, lines);
         }
         return ret;
 }
 
 static void
-measure_cache_miss_latency_tsc(void)
+measure_cache_miss_latency_tsc(struct mem_root_s *mem_root)
 {
         unsigned nb_lines = 262144;
         int ret;
 
         do {
-                ret = measure_latency(nb_lines);
+                ret = measure_latency(mem_root, nb_lines);
                 nb_lines <<= 1;
         } while (!ret);
 }
 
-/***************************************************************************************************
- *
- ***************************************************************************************************/
-static int
-idx_test(struct cuckoo_hash_s *cuckoo)
-{
-        struct cuckoo_node_s *node;
-        struct idx_tbl_s node_idx_tbl;
 
-        fprintf(stderr, "%s:%d start\n", __func__, __LINE__);
-
-        idx_tbl_init(&node_idx_tbl, sizeof(*node) + cuckoo->key_len, -1, cuckoo->node_tbl.base);
-
-        for (unsigned idx = 0; idx < idx_tbl_nb(&cuckoo->node_tbl); idx++) {
-                node = idx2ptr(&node_idx_tbl, idx);
-
-                if (node_ptr(cuckoo, idx) != node) {
-                        fprintf(stderr, "failed idx2ptr idx:%u\n", idx);
-                        return -1;
-                }
-
-                if (ptr2idx(&node_idx_tbl, node) != node_idx(cuckoo, node)) {
-                        fprintf(stderr, "failed ptr2idx idx:%u\n", idx);
-                        return -1;
-                }
-        }
-        fprintf(stderr, "%s:%d success\n", __func__, __LINE__);
-        return 0;
-}
-
-#define PAGE_SIZE	 1024 * 1024 * 1024
-static void *
-alloc_hugepage(size_t *len)
-{
-        size_t size;
-        for (size = PAGE_SIZE; size < *len; size += PAGE_SIZE)
-                ;
-        void *p = mmap(NULL, size,
-                       PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB,
-                       -1, 0);
-        if (p == MAP_FAILED) {
-                perror("mmap");
-                return NULL;
-        }
-
-        memset(p, 0, size);
-
-        *len = size;
-        return p;
-}
-
-static void
-free_hugepage(void *p,
-              size_t len)
-{
-        if (munmap(p, len) == -1) {
-                fprintf(stderr, "failed to munmap\n");
-                perror("munmap");
-        }
-}
 
 static int
-user_data_init(void *user_data __attribute__((unused)),
-               unsigned user_len __attribute__((unused)),
-               const void *key __attribute__((unused)),
-               unsigned key_len __attribute__((unused)))
+mem_area_test(struct cuckoo_hash_s *cuckoo,
+              unsigned nb,
+              unsigned key_len)
 {
-        return 0;
+        size_t sz = cuckoo_sizeof(nb, key_len);
+        uint8_t *p = (uint8_t *) node_ptr(cuckoo, nb);
+
+        size_t len = p - (uint8_t *) cuckoo;
+        fprintf(stdout, "size:%zu len:%zu\n", sz, len);
+
+        return !(sz == len);
 }
+
 
 int
 cuckoo_test(unsigned nb,
@@ -3402,27 +3391,40 @@ cuckoo_test(unsigned nb,
             bool do_hp,
             unsigned flags)
 {
-        struct cuckoo_hash_s *cuckoo;
-        uint64_t *user_array = malloc(sizeof(*user_array) * nb);
+        struct mem_root_s *mem_root = NULL;
+        struct cuckoo_hash_s *cuckoo = NULL;
+        struct user_data_s *user_array = NULL;
+
+        mem_root = TMA_create((size_t) 2 * 1024 * 1024 * 1024,
+                              (size_t) 2 * 1024 * 1024,
+                              do_hp);
+        if (!mem_root) {
+                fprintf(stderr, "no mempry\n");
+                goto end;
+        }
 
         size_t len = cuckoo_sizeof(nb, sizeof(union test_key_u));
-
         fprintf(stdout, "nb:%u size:%zu %fMB\n", nb, len, (double) len/1024/1024);
 
-        if (do_hp)
-                cuckoo = alloc_hugepage(&len);
-        else
-                cuckoo = aligned_alloc(CUCKOO_CACHELINE_SIZE, len);
+        cuckoo = TMA_alloc(mem_root, len);
+        user_array = TMA_alloc(mem_root, sizeof(*user_array) * nb);
+
+        if (!cuckoo || !user_array) {
+                fprintf(stderr, "no mempry\n");
+                goto end;
+        }
 
         cuckoo_init(cuckoo, nb, sizeof(union test_key_u), ctx_size, NULL,
                     user_data_init, user_array, sizeof(*user_array),
                     flags);
+
         cuckoo_dump(cuckoo, stdout, "Root");
-
-        if (idx_test(cuckoo))
+        if (mem_area_test(cuckoo, nb, sizeof(union test_key_u))) {
+                fprintf(stderr, "failed to test memory area.\n");
                 goto end;
+        }
 
-        union test_key_u **key = init_key(nb);
+        union test_key_u **key = init_key(mem_root, nb);
 
         if (do_basic) {
                 if (single_add_del_test(cuckoo, key, nb))
@@ -3431,7 +3433,7 @@ cuckoo_test(unsigned nb,
                 if (collision_test(cuckoo, key, nb))
                         goto end;
 
-                if (max_test(cuckoo, key, nb))
+                if (max_test(mem_root, cuckoo, key, nb))
                         goto end;
         }
 
@@ -3445,18 +3447,18 @@ cuckoo_test(unsigned nb,
 
         if (do_unit) {
                 speed_test_hash_bulk(cuckoo, key, nb);
-                unit_test();
+                unit_test(mem_root);
         }
 
 
  end:
-        if (do_hp)
-                free_hugepage(cuckoo, len);
-        else
-                free(cuckoo);
+        TMA_free(mem_root, user_array);
+        TMA_free(mem_root, cuckoo);
 
         if (do_mem)
-                measure_cache_miss_latency_tsc();
+                measure_cache_miss_latency_tsc(mem_root);
+
+        TMA_destroy(mem_root);
         return 0;
 }
 

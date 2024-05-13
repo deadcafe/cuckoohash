@@ -15,11 +15,6 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-#include "index_queue.h"
-
-#ifndef always_inline
-# define always_inline  static inline __attribute__ ((__always_inline__))
-#endif  /* !always_inline */
 
 #define CUCKOO_CACHELINE_SIZE	64
 
@@ -61,30 +56,7 @@ enum cuckoo_opt_e {
 #define	CUCKOO_DISABLE_FLAG(opt)	(1 << (opt))
 #define CUCKOO_IS_DISABLE(flag, opt)	((flag) & CUCKOO_DISABLE_FLAG((opt)))
 
-/*
- * 8 bytes
- */
-union cuckoo_hash_u {
-        uint64_t val64;
-        uint32_t val32[2];
-};
-
-
-/*
- *　Must be a multiple of CUCKOO_CACHELINE_SIZE
- */
-struct cuckoo_node_s {
-        IDXQ_ENTRY(cuckoo_node_s) entry;
-        union cuckoo_hash_u hash;
-
-#if !defined(KEY_IS_IN_BUCKET)
-        uint8_t key[0];
-#endif
-};
-
-
-
-struct idx_pool_s;
+struct cuckoo_node_s;
 struct cuckoo_bucket_s;
 
 /**
@@ -108,9 +80,7 @@ typedef union cuckoo_hash_u (*cuckoo_hash_func_t)(const void *key, unsigned len,
  * @param key_len
  * @return void
  */
-typedef int (*cuckoo_user_initializer_t)(void *user_data, unsigned user_len,
-                                         const void *key, unsigned key_len);
-
+typedef int (*cuckoo_user_initializer_t)(void *user_data, const void *key);
 
 /**
  * @brief Generate cuckoo hashing table
@@ -203,7 +173,7 @@ extern unsigned cuckoo_empty_num(const struct cuckoo_hash_s *cuckoo);
  * @return Number of removed nodes
  */
 extern unsigned cuckoo_del_bulk(struct cuckoo_hash_s *cuckoo,
-                                struct cuckoo_node_s **node_pp,
+                                void **user_pp,
                                 unsigned nb);
 
 /**
@@ -213,12 +183,16 @@ extern unsigned cuckoo_del_bulk(struct cuckoo_hash_s *cuckoo,
  * @param fkey_pp to the node search key array.
  * @param nb to the number of keys.
  * @param node_pp to the node pointer array
+ * @param enable_add to the adding key
+ * @param enable_chai to the chaining access list
  * @return Number of nodes searched.
  */
 extern unsigned cuckoo_find_bulk(struct cuckoo_hash_s *cuckoo,
                                  const void * const *key_pp,
                                  unsigned nb,
-                                 struct cuckoo_node_s **node_pp);
+                                 void **user_pp,
+                                 bool enable_add,
+                                 bool enable_chain);
 
 
 /**
@@ -244,7 +218,7 @@ extern void cuckoo_hash_bulk(struct cuckoo_hash_s *cuckoo,
  * @return If positive, the number of nodes; if negative, the return value of the callback function.
  */
 extern int cuckoo_walk(struct cuckoo_hash_s *cuckoo,
-                       int (*cb_func)(struct cuckoo_hash_s *, struct cuckoo_node_s *, void *),
+                       int (*cb_func)(struct cuckoo_hash_s *, void *, void *),
                        void *arg);
 /**
  * @brief Find node from hashing table.
@@ -253,14 +227,16 @@ extern int cuckoo_walk(struct cuckoo_hash_s *cuckoo,
  * @param fkey_p to the saerch key pointer.
  * @return node pointer
  */
-static inline struct cuckoo_node_s *
+static inline void *
 cuckoo_find_oneshot(struct cuckoo_hash_s *cuckoo,
-                    const void *key_p)
+                    const void *key_p,
+                    bool enable_add,
+                    bool enable_chain)
 {
-        struct cuckoo_node_s *node_p = NULL;
+        void *user_p = NULL;
 
-        cuckoo_find_bulk(cuckoo, &key_p, 1, &node_p);
-        return node_p;
+        cuckoo_find_bulk(cuckoo, &key_p, 1, &user_p, enable_add, enable_chain);
+        return user_p;
 }
 
 /**
@@ -272,14 +248,14 @@ cuckoo_find_oneshot(struct cuckoo_hash_s *cuckoo,
  */
 static inline void
 cuckoo_del_oneshot(struct cuckoo_hash_s *cuckoo,
-                   struct cuckoo_node_s *node)
+                   void *user)
 {
-        cuckoo_del_bulk(cuckoo, &node, 1);
+        cuckoo_del_bulk(cuckoo, &user, 1);
 }
 
 extern const void *
 cuckoo_key(const struct cuckoo_hash_s *cuckoo,
-           const struct cuckoo_node_s *node);
+           const void *user);
 
 /************************************************************************************************
  * for debug
@@ -316,7 +292,7 @@ extern unsigned cuckoo_bk_empty_nb(const struct cuckoo_hash_s *cuckoo,
                                 struct cuckoo_bucket_s *bk);
 
 extern int cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
-                         const struct cuckoo_node_s *node,
+                         const void *user,
                          const void *key);
 
 extern int cuckoo_test(unsigned nb,
