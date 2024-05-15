@@ -45,6 +45,7 @@ main(int ac,
         bool do_basic = false;
         bool do_mem = false;
         bool do_hp = false;
+        bool do_list = true;
         unsigned ctx_size = 7;	/* 1~8 default:5 */
         unsigned flags = 0;
 
@@ -61,19 +62,19 @@ main(int ac,
                         do_basic = true;
                         break;
                 case 'c':
-                        ctx_size = atoi(optarg);
+                        ctx_size = (unsigned) atoi(optarg);
                         break;
                 case 'm':
                         do_mem = true;
                         break;
                 case 'n':
-                        nb = atoi(optarg);
+                        nb = (unsigned) atoi(optarg);
                         break;
                 case 's':
                         do_speed_test = true;
                         break;
                 case 'l':
-                        flags |= CUCKOO_DISABLE_FLAG(CUCKOO_DISABLE_LIST);
+                        do_list = false;
                         break;
                 case 'u':
                         do_unit = true;
@@ -88,7 +89,7 @@ main(int ac,
                 }
         }
 
-        cuckoo_test(nb, ctx_size, do_basic, do_speed_test, do_analyze, do_unit, do_mem, do_hp, flags);
+        cuckoo_test(nb, ctx_size, do_basic, do_speed_test, do_analyze, do_unit, do_mem, do_hp, do_list, flags);
 
         return 0;
 }

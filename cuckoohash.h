@@ -15,7 +15,6 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-
 #define CUCKOO_CACHELINE_SIZE	64
 
 #ifndef _CUCKOO_CACHE_ALIGNED
@@ -27,10 +26,8 @@
 #define CUCKOO_FIND_DEPTH	2
 #define CUCKOO_PIPELINE_NB	27
 
-
 #define CUCKOO_COEF			13
 #define CUCKOO_EFFECTIVE_CAPA(nb)	(((nb) / CUCKOO_BUCKET_ENTRY_SZ) * CUCKOO_COEF)
-
 
 #define CUCKOO_INVALID_HASH64	UINT64_C(-1)	/* -1 : invalid */
 #define CUCKOO_INVALID_HVAL	IDXQ_NULL
@@ -46,13 +43,12 @@ enum cuckoo_opt_e {
         CUCKOO_DISABLE_SSE42,
         CUCKOO_DISABLE_AVX2,
         CUCKOO_DISABLE_AVX512,
-        CUCKOO_DISABLE_LIST,
+        //        CUCKOO_DISABLE_LIST,
 
         CUCKOO_DISABLE_NB,
 };
 
-#define CUCKOO_DISABLE_ALL	(unsigned) -1
-
+#define CUCKOO_DISABLE_ALL		(unsigned) -1
 #define	CUCKOO_DISABLE_FLAG(opt)	(1 << (opt))
 #define CUCKOO_IS_DISABLE(flag, opt)	((flag) & CUCKOO_DISABLE_FLAG((opt)))
 
@@ -303,6 +299,7 @@ extern int cuckoo_test(unsigned nb,
                        bool do_unit,
                        bool do_mem,
                        bool do_hp,
+                       bool do_list,
                        unsigned flags);
 
 #endif	/* !_CUCKOOHASH_H_ */

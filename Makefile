@@ -6,9 +6,16 @@
 CURDIR:=$(PWD)
 
 #OPTFLAGS := -O3 -march=native -mrtm -mavx2 -msse4.1 -msse4.2 -mcrc32 -mmovbe -mbmi -fomit-frame-pointer -fpie -fpic
-OPTFLAGS := -O3 -march=native -fomit-frame-pointer -fpie -fpic
+OPTFLAGS := -O3 -march=native -fomit-frame-pointer -fpie -fpic -std=gnu11
 
-CFLAGS  = -g $(OPTFLAGS) -Werror -Wextra -Wall -Wstrict-aliasing -std=gnu11 -pipe
+DEBUGFLAGS := -Wall -Wextra -Wconversion -Wcast-qual -Wcast-align -Wshadow \
+	      -Wstrict-aliasing=1 -Wswitch-enum -Wdeclaration-after-statement \
+              -Wstrict-prototypes -Wundef -Wpointer-arith -Wformat-security \
+              -Wvla -Wformat=2 -Winit-self -Wfloat-equal -Wwrite-strings \
+              -Wredundant-decls -Wstrict-overflow=2 \
+              -Werror -Wstrict-aliasing
+
+CFLAGS  = -g $(OPTFLAGS) $(DEBUGFLAGS) -pipe
 CPPFLAGS = -c -I$(CURDIR) -D_GNU_SOURCE -DENABLE_UINIT_TEST
 LIBS =
 LDFLAGS =
@@ -27,6 +34,7 @@ endif
 
 SRCS    =       \
 	cuckoohash.c \
+	hash.c \
 	main.c
 
 OBJS = ${SRCS:.c=.o}
