@@ -34,7 +34,7 @@ endif
 
 SRCS    =       \
 	cuckoohash.c \
-	hash.c \
+	xxhash.c \
 	main.c
 
 OBJS = ${SRCS:.c=.o}

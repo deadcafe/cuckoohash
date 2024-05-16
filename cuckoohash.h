@@ -1,5 +1,30 @@
 /* SPDX-License-Identifier: BSD-2-Clause
  * Copyright(c) 2024 deadcafe.beef@gmail.com. All rights reserved.
+ *
+ * BSD 2-Clause License (https://www.opensource.org/licenses/bsd-license.php)
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in
+ *      the documentation and/or other materials provided with the
+ *      distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 /*
@@ -10,29 +35,11 @@
 #define _CUCKOOHASH_H_
 
 #include <sys/types.h>
-#include <inttypes.h>
-#include <errno.h>
-#include <stdio.h>
+#include <stdint.h>
 #include <stdbool.h>
-
-#define CUCKOO_CACHELINE_SIZE	64
-
-#ifndef _CUCKOO_CACHE_ALIGNED
-# define _CUCKOO_CACHE_ALIGNED	__attribute__((aligned(CUCKOO_CACHELINE_SIZE)))
-#endif	/* !_CUCKOO_CACHE_ALIGNED */
 
 #define CUCKOO_BUCKET_ENTRY_SZ	16
 #define CUCKOO_NB_ENTRIES_MIN	(CUCKOO_BUCKET_ENTRY_SZ * CUCKOO_BUCKET_ENTRY_SZ * CUCKOO_BUCKET_ENTRY_SZ)
-#define CUCKOO_FIND_DEPTH	2
-#define CUCKOO_PIPELINE_NB	27
-
-#define CUCKOO_COEF			13
-#define CUCKOO_EFFECTIVE_CAPA(nb)	(((nb) / CUCKOO_BUCKET_ENTRY_SZ) * CUCKOO_COEF)
-
-#define CUCKOO_INVALID_HASH64	UINT64_C(-1)	/* -1 : invalid */
-#define CUCKOO_INVALID_HVAL	IDXQ_NULL
-#define CUCKOO_INVALID_IDX	IDXQ_NULL	/* -1 : invalid */
-#define CUCKOO_INVALID_FLAGS	UINT64_C(-1)
 
 /*
  *
@@ -43,7 +50,6 @@ enum cuckoo_opt_e {
         CUCKOO_DISABLE_SSE42,
         CUCKOO_DISABLE_AVX2,
         CUCKOO_DISABLE_AVX512,
-        //        CUCKOO_DISABLE_LIST,
 
         CUCKOO_DISABLE_NB,
 };

@@ -20,7 +20,7 @@ static void
 usage(const char *prog)
 {
         fprintf(stderr,
-                "%s [-n nb] [-c ctx] [-s] [-l] [-b] [-m] [-u] [-g] [-d]\n"
+                "%s [-n nb] [-c ctx] [-s] [-l] [-b] [-m] [-u] [-g] [-d] [-4]\n"
                 "-n nb	Number of elements\n"
                 "-c ctx	Number of contexts\n"
                 "-s	Speed Test\n"
@@ -30,6 +30,7 @@ usage(const char *prog)
                 "-u	Unit Test\n"
                 "-g	Hugepage mode\n"
                 "-d	Debug mode\n"
+                "-4     Disable SSE4.2\n"
                 , prog);
 }
 
@@ -46,12 +47,15 @@ main(int ac,
         bool do_mem = false;
         bool do_hp = false;
         bool do_list = true;
-        unsigned ctx_size = 7;	/* 1~8 default:5 */
+        unsigned ctx_size = 7;	/* 1~9 default:5 */
         unsigned flags = 0;
 
-        while ((opt = getopt(ac, av, "c:n:sluabmhgd")) != -1) {
+        while ((opt = getopt(ac, av, "c:n:sluabmhgd4")) != -1) {
 
                 switch (opt) {
+                case '4':
+                        flags |= CUCKOO_DISABLE_FLAG(CUCKOO_DISABLE_SSE42);
+                        break;
                 case 'g':
                         do_hp = true;
                         break;

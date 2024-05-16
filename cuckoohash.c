@@ -1,8 +1,32 @@
 /* SPDX-License-Identifier: BSD-2-Clause
  * Copyright(c) 2024 deadcafe.beef@gmail.com. All rights reserved.
+ *
+ * BSD 2-Clause License (https://www.opensource.org/licenses/bsd-license.php)
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above copyright
+ *      notice, this list of conditions and the following disclaimer in
+ *      the documentation and/or other materials provided with the
+ *      distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <bsd/sys/tree.h>
 #include <sys/queue.h>
 #include <sys/mman.h>
 #include <stdbool.h>
@@ -12,6 +36,8 @@
 #include <sched.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <inttypes.h>
 
 #if defined(ENABLE_PAPI)
 # include <papi.h>
@@ -19,6 +45,7 @@
 
 #include "cuckoohash.h"
 #include "index_queue.h"
+#include "xxhash.h"
 
 #ifndef always_inline
 # define always_inline  static inline __attribute__ ((__always_inline__))
@@ -38,6 +65,23 @@
 #ifndef CEIL_MULTIPLE
 # define CEIL_MULTIPLE(value, multiple) (((value) + (multiple) - 1) / (multiple) * (multiple))
 #endif
+
+#define CUCKOO_CACHELINE_SIZE	64
+
+#ifndef _CUCKOO_CACHE_ALIGNED
+# define _CUCKOO_CACHE_ALIGNED	__attribute__((aligned(CUCKOO_CACHELINE_SIZE)))
+#endif	/* !_CUCKOO_CACHE_ALIGNED */
+
+#define CUCKOO_FIND_DEPTH	2
+#define CUCKOO_PIPELINE_NB	(3 * 9)
+
+#define CUCKOO_COEF			13
+#define CUCKOO_EFFECTIVE_CAPA(nb)	(((nb) / CUCKOO_BUCKET_ENTRY_SZ) * CUCKOO_COEF)
+
+#define CUCKOO_INVALID_HASH64	UINT64_C(-1)	/* -1 : invalid */
+#define CUCKOO_INVALID_HVAL	IDXQ_NULL
+#define CUCKOO_INVALID_IDX	IDXQ_NULL	/* -1 : invalid */
+#define CUCKOO_INVALID_FLAGS	UINT64_C(-1)
 
 /***************************************************************************************************
  *
@@ -526,67 +570,21 @@ GENERIC_find_32x16(const uint32_t *array,
 /*
  *
  */
-static inline uint32_t
-murmurhash3_32(const uint32_t *blocks,
-               unsigned nblocks,
-               uint32_t seed)
-{
-        uint32_t c1 = 0xcc9e2d51;
-        uint32_t c2 = 0x1b873593;
-        uint32_t r1 = 15;
-        uint32_t r2 = 13;
-        uint32_t m = 5;
-        uint32_t n = 0xe6546b64;
-        uint32_t hash = seed;
-
-        for (unsigned i = 0; i < nblocks; i++) {
-                uint32_t k = blocks[i];
-                k *= c1;
-                k = (k << r1) | (k >> (32 - r1));
-                k *= c2;
-
-                hash ^= k;
-                hash = ((hash << r2) | (hash >> (32 - r2))) * m + n;
-        }
-
-        hash ^= (nblocks * 4);
-        hash ^= (hash >> 16);
-        hash *= 0x85ebca6b;
-        hash ^= (hash >> 13);
-        hash *= 0xc2b2ae35;
-        hash ^= (hash >> 16);
-
-        return hash;
-}
-
-/*
- *
- */
 static inline union cuckoo_hash_u
-GENERIC_calc_hash(const void *key,
-                  unsigned key_len,
-                  uint32_t mask)
+XXH3_calc_hash(const void *key,
+               unsigned len,
+               uint32_t mask)
 {
         union cuckoo_hash_u hash;
-        const uint32_t *d32 = key;
-        unsigned size = key_len / sizeof(*d32);
 
-        hash.val32[0] = 0;
-        hash.val32[1] = 0xdeadbeef;
-
-        for (unsigned i = 0; i < size; i += 2) {
-                hash.val32[0] = murmurhash3_32(&d32[i], 2, hash.val32[0]);
-                hash.val32[1] = murmurhash3_32(&hash.val32[0], 1, hash.val32[1]);
-        }
-
+        hash.val64 = XXH3_hash64(key, len, 0);
         while (((hash.val32[1] & mask) == (hash.val32[0] & mask)) ||
                ((hash.val32[0] ^ hash.val32[1]) == CUCKOO_INVALID_HVAL)) {
-                uint32_t h = __builtin_bswap32(hash.val32[1]);
+                uint64_t h;
 
-                h = ~murmurhash3_32(hash.val32, 2, h);
-                hash.val32[1] = h ^ hash.val32[0];
+                h = XXH3_hash64(&hash, sizeof(hash), hash.val64);
+                hash.val64 ^= h;
         }
-
         return hash;
 }
 
@@ -603,11 +601,7 @@ BUCKET_DRIVER_GENERATE(GENERIC);
 always_inline void
 cacheline_flush(void * ptr)
 {
-#if 1
-                _mm_clflushopt(ptr);
-#else
-                asm volatile ("clflushopt (%0)" :: "r" ptr : "memory");
-#endif
+        _mm_clflushopt(ptr);
 }
 
 /*****************************************************************************
@@ -657,6 +651,46 @@ BUCKET_DRIVER_GENERATE(SSE41);
  * SSE4.2 depened code -->
  *****************************************************************************/
 #if defined(__SSE4_2__)
+
+static inline uint32_t
+crc32c(const void *p,
+       size_t length,
+       uint32_t seed)
+{
+        const uint8_t *data = p;
+        uint32_t crc = seed;
+
+        // まず、8バイトアラインメントを確認し、アラインされるまで1バイト単位で処理
+        while (length && ((uintptr_t) data & 7)) {
+                crc = _mm_crc32_u8(crc, *data++);
+                length--;
+        }
+
+        // アラインされた状態で8バイト単位で処理
+        while (length >= 8) {
+                crc = (uint32_t) _mm_crc32_u64(crc, *(const uint64_t *) data);
+                data += 8;
+                length -= 8;
+        }
+
+        // 残りのデータを4バイト、2バイト、1バイトで処理
+        if (length >= 4) {
+                crc = _mm_crc32_u32(crc, *(const uint32_t *) data);
+                data += 4;
+                length -= 4;
+        }
+        if (length >= 2) {
+                crc = _mm_crc32_u16(crc, *(const uint16_t *) data);
+                data += 2;
+                length -= 2;
+        }
+        while (length--) {
+                crc = _mm_crc32_u8(crc, *data++);
+        }
+
+        return crc;
+}
+
 /*
  *
  */
@@ -666,24 +700,20 @@ SSE42_calc_hash(const void *key,
                 uint32_t mask)
 {
         union cuckoo_hash_u hash;
-        const uint64_t *d64 = key;
-        unsigned size = len / sizeof(*d64);
 
-        hash.val32[0] = 0;
+        hash.val32[0] = crc32c(key, len, UINT32_C(-1));
         hash.val32[1] = 0xdeadbeef;
 
-        for (unsigned i = 0; i < size; i++) {
-                hash.val32[0] = (uint32_t) _mm_crc32_u64(hash.val32[0], d64[i]);
-                hash.val32[1] = __builtin_bswap32(hash.val32[0]) ^ hash.val32[1];
-        }
+        hash.val32[1] = __builtin_bswap32(hash.val32[0]) ^ hash.val32[1];
 
-        while (((hash.val32[1] & mask) == (hash.val32[0] & mask)) ||
-               ((hash.val32[0] ^ hash.val32[1]) == CUCKOO_INVALID_HVAL)) {
+        do {
                 uint32_t h = __builtin_bswap32(hash.val32[1]);
 
                 h = (uint32_t) ~_mm_crc32_u64(h, hash.val64);
                 hash.val32[1] = h ^ hash.val32[0];
-        }
+        } while (((hash.val32[1] & mask) == (hash.val32[0] & mask)) ||
+                 ((hash.val32[0] ^ hash.val32[1]) == CUCKOO_INVALID_HVAL));
+
         return hash;
 }
 #endif
@@ -749,7 +779,7 @@ always_inline uint64_t
 AVX512_find_32x16(const uint32_t *array,
                   uint32_t val)
 {
-        __m512i target = _mm512_load_si512((__m512i *) (volatile void *) array);
+        __m512i target = _mm512_load_si512((const __m512i *) (const void *) array);
         __m512i key = _mm512_set1_epi32(val);
 
         return AVX512_cmp_flag(target, key);
@@ -867,7 +897,6 @@ arm_handler_init(struct cuckoo_hash_s *cuckoo,
         cuckoo->find_hval = NEON_find_hval_in_bucket;
 }
 #endif /* __ARM_NEON__ */
-
 
 /*
  *
@@ -1571,7 +1600,7 @@ cuckoo_init(struct cuckoo_hash_s *cuckoo,
 
         cuckoo->find_idx  = GENERIC_find_idx_in_bucket;
         cuckoo->find_hval = GENERIC_find_hval_in_bucket;
-        cuckoo->calc_hash = GENERIC_calc_hash;
+        cuckoo->calc_hash = XXH3_calc_hash;
 
 #if defined(__x86_64__)
         x86_handler_init(cuckoo, flags);
@@ -2490,7 +2519,7 @@ TMA_destroy(struct mem_root_s *root)
         if (root) {
                 if (root->mem != MAP_FAILED) {
                         if (munmap(root->mem, root->total_size) == -1)
-                                perror("munmap");
+                                perror("munmap:");
                         free(root);
                 }
         }
@@ -2525,6 +2554,7 @@ TMA_create(size_t total_size,
                                  -1, 0);
 
                 if (root->mem == MAP_FAILED) {
+                        perror("mmap:");
                         TMA_destroy(root);
                         root = NULL;
                 } else {
@@ -2586,9 +2616,11 @@ speed_test_hash_bulk(struct mem_root_s *mem_root,
         uint64_t tsc;
         union cuckoo_hash_u *hash;
 
+        fprintf(stdout, "%s:%d nb:%u\n", __func__, __LINE__, nb);
+
         hash = TMA_alloc(mem_root, sizeof(*hash) * nb);
         if (hash) {
-                cuckoo->calc_hash = GENERIC_calc_hash;
+                cuckoo->calc_hash = XXH3_calc_hash;
                 tsc = rdtsc();
                 cuckoo_hash_bulk(cuckoo, (const void * const *) key_pp, hash, nb);
                 tsc = rdtsc() - tsc;
@@ -3439,6 +3471,11 @@ cuckoo_test(unsigned nb,
         struct user_data_s *user_array = NULL;
         size_t len;
         union test_key_u **key;
+        cuckoo_hash_func_t hash_func = NULL;
+
+#if 0
+        hash_func = XXH_calc_hash;
+#endif
 
         mem_root = TMA_create((size_t) 2 * 1024 * 1024 * 1024,
                               (size_t) 2 * 1024 * 1024,
@@ -3459,7 +3496,8 @@ cuckoo_test(unsigned nb,
                 goto end;
         }
 
-        cuckoo_init(cuckoo, nb, sizeof(union test_key_u), ctx_size, NULL,
+        cuckoo_init(cuckoo, nb, sizeof(union test_key_u), ctx_size,
+                    hash_func,
                     user_data_init, user_array, sizeof(*user_array),
                     flags);
 
@@ -3506,53 +3544,5 @@ cuckoo_test(unsigned nb,
         TMA_destroy(mem_root);
         return 0;
 }
-
-#if 0
-static inline union cuckoo_hash_u
-SSE42_calc_hash_new(const void *p,
-                    unsigned len,
-                    uint32_t mask)
-{
-        uint32_t crc0 = UINT32_C(-1);
-        uint32_t crc1 = UINT32_C(0xdeadbeef);
-        const uint8_t *data = p;
-
-        // まず、8バイトアラインメントを確認し、アラインされるまで1バイト単位で処理
-        while (length && ((uintptr_t)data & 7)) {
-                crc0 = _mm_crc32_u8(crc0, *data++);
-                crc1 = _mm_crc32_u8(crc1, *data++);
-                length--;
-        }
-
-        // アラインされた状態で8バイト単位で処理
-        while (length >= 8) {
-                crc0 = _mm_crc32_u64(crc0, *(const uint64_t *) data);
-                crc1 = _mm_crc32_u64(crc1, *(const uint64_t *) data);
-                data += 8;
-                length -= 8;
-        }
-
-        // 残りのデータを4バイト、2バイト、1バイトで処理
-        if (length >= 4) {
-                crc0 = _mm_crc32_u32(crc0, *(const uint32_t *) data);
-                crc1 = _mm_crc32_u32(crc1, *(const uint32_t *) data);
-                data += 4;
-                length -= 4;
-        }
-        if (length >= 2) {
-                crc0 = _mm_crc32_u16(crc0, *(const uint16_t *) data);
-                crc1 = _mm_crc32_u16(crc1, *(const uint16_t *) data);
-                data += 2;
-                length -= 2;
-        }
-        while (length--) {
-                crc0 = _mm_crc32_u8(crc0, *data++);
-                crc1 = _mm_crc32_u8(crc1, *data++);
-        }
-
-        // 最終的なCRC32Cの値を反転
-        return ~crc;
-}
-#endif
 
 #endif /* ENABLE_UINIT_TEST */
