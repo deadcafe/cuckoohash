@@ -2585,9 +2585,9 @@ TMA_create(size_t total_size,
  * 48 + 8 bytes
  */
 union test_key_u {
-        uint8_t data[48];
-        uint32_t d32[12];
-        uint64_t d64[6 ];
+        uint8_t data[48 + 64];
+        uint32_t d32[12 + 16];
+        uint64_t d64[ 6 +  8];
 };
 
 struct user_data_s {
