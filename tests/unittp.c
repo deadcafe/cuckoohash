@@ -59,11 +59,19 @@
 /*
  * 48 + 8 bytes
  */
+#if 1
 union test_key_u {
         uint8_t data[48 + 64];
         uint32_t d32[12 + 16];
         uint64_t d64[ 6 +  8];
 };
+#else
+union test_key_u {
+        uint8_t data[8];
+        uint32_t d32[2];
+        uint64_t d64[1];
+};
+#endif
 
 struct user_data_s {
         const union test_key_u *key;
