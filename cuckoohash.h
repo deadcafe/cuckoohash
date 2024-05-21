@@ -38,6 +38,17 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include <index_queue.h>
+
+/* *************************************
+*  Version
+***************************************/
+#define CUCKOOHASH_VERSION_MAJOR    0
+#define CUCKOOHASH_VERSION_MINOR    0
+#define CUCKOOHASH_VERSION_RELEASE  0
+/*! @brief Version number, encoded as two digits each */
+#define CUCKOOHASH_VERSION_NUMBER  (CUCKOOHASH_VERSION_MAJOR *100*100 + CUCKOOHASH_VERSION_MINOR *100 + CUCKOOHASH_VERSION_RELEASE)
+
 #define CUCKOO_BUCKET_ENTRY_SZ	16
 #define CUCKOO_NB_ENTRIES_MIN	(CUCKOO_BUCKET_ENTRY_SZ * CUCKOO_BUCKET_ENTRY_SZ * CUCKOO_BUCKET_ENTRY_SZ)
 
@@ -58,8 +69,37 @@ enum cuckoo_opt_e {
 #define	CUCKOO_DISABLE_FLAG(opt)	(1 << (opt))
 #define CUCKOO_IS_DISABLE(flag, opt)	((flag) & CUCKOO_DISABLE_FLAG((opt)))
 
-struct cuckoo_node_s;
-struct cuckoo_bucket_s;
+#define CUCKOO_CACHELINE_SIZE	64
+
+#ifndef _CUCKOO_CACHE_ALIGNED
+# define _CUCKOO_CACHE_ALIGNED	__attribute__((aligned(CUCKOO_CACHELINE_SIZE)))
+#endif	/* !_CUCKOO_CACHE_ALIGNED */
+
+/*
+ * 128 bytes
+ */
+struct cuckoo_bucket_s {
+        uint32_t hval[CUCKOO_BUCKET_ENTRY_SZ];		/* hash value */
+        uint32_t idx[CUCKOO_BUCKET_ENTRY_SZ];		/* node index */
+} _CUCKOO_CACHE_ALIGNED;
+
+/*
+ * 8 bytes
+ */
+union cuckoo_hash_u {
+        uint64_t val64;
+        uint32_t val32[2];
+};
+
+/*
+ *　Must be a multiple of CUCKOO_CACHELINE_SIZE
+ */
+struct cuckoo_node_s {
+        IDXQ_ENTRY(cuckoo_node_s) entry;
+        union cuckoo_hash_u hash;
+
+        uint8_t key[0];
+};
 
 /**
  * @brief Calculates the hash value for a given key.
@@ -72,7 +112,7 @@ struct cuckoo_bucket_s;
  * @param mask value
  * @return cuckoo_hash_u 64bit hash value
  */
-typedef union cuckoo_hash_u (*cuckoo_hash_func_t)(const void *key, unsigned len, uint32_t mask);
+typedef union cuckoo_hash_u (*cuckoo_hash_func_t)(const void *key, size_t len, uint32_t mask);
 
 /**
  * @brief Function to initialize node
@@ -262,6 +302,34 @@ cuckoo_key(const struct cuckoo_hash_s *cuckoo,
 /************************************************************************************************
  * for debug
  ************************************************************************************************/
+struct cuckoo_find_handler_s {
+        uint64_t (*find_32x16)(const uint32_t *, uint32_t);
+        const char *name;
+};
+
+extern const struct cuckoo_find_handler_s cuckoo_find_handlers[];
+
+struct cuckoo_calchash_handler_s {
+        cuckoo_hash_func_t calc_hash;
+        const char *name;
+};
+
+extern const struct cuckoo_calchash_handler_s cuckoo_calchash_handlers[];
+
+extern struct cuckoo_node_s *cuckoo_node(const struct cuckoo_hash_s *cuckoo,
+                                         const void *user);
+
+extern void cuckoo_calkhash_set(struct cuckoo_hash_s *cuckoo,
+                                cuckoo_hash_func_t calc_hash);
+extern cuckoo_hash_func_t cuckoo_calkhash_get(const struct cuckoo_hash_s *cuckoo);
+
+extern void cuckoo_cnt_get(const struct cuckoo_hash_s *cuckoo, uint64_t *cnt, uint64_t *tsc);
+extern void cuckoo_ctxnb_set(struct cuckoo_hash_s *cuckoo, unsigned nb);
+
+extern unsigned cuckoo_bucket_idx(const struct cuckoo_hash_s *cuckoo, const struct cuckoo_bucket_s *bk);
+extern struct cuckoo_node_s * cuckoo_node_ptr(const struct cuckoo_hash_s *cuckoo, unsigned idx);
+
+
 extern int cuckoo_flipflop(const struct cuckoo_hash_s *cuckoo,
                            const struct cuckoo_node_s *node);
 

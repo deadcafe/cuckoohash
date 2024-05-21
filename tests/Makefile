@@ -27,22 +27,14 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 # ################################################################
-Q = $(if $(filter 1,$(V) $(VERBOSE)),,@)
 
-# Version numbers
-SED ?= sed
-SED_ERE_OPT ?= -E
-LIBVER_MAJOR_SCRIPT:=`$(SED) -n '/define CUCKOOHASH_VERSION_MAJOR/s/.*[[:blank:]]\([0-9][0-9]*\).*/\1/p' < cuckoohash.h`
-LIBVER_MINOR_SCRIPT:=`$(SED) -n '/define CUCKOOHASH_VERSION_MINOR/s/.*[[:blank:]]\([0-9][0-9]*\).*/\1/p' < cuckoohash.h`
-LIBVER_PATCH_SCRIPT:=`$(SED) -n '/define CUCKOOHASH_VERSION_RELEASE/s/.*[[:blank:]]\([0-9][0-9]*\).*/\1/p' < cuckoohash.h`
-LIBVER_MAJOR := $(shell echo $(LIBVER_MAJOR_SCRIPT))
-LIBVER_MINOR := $(shell echo $(LIBVER_MINOR_SCRIPT))
-LIBVER_PATCH := $(shell echo $(LIBVER_PATCH_SCRIPT))
-LIBVER := $(LIBVER_MAJOR).$(LIBVER_MINOR).$(LIBVER_PATCH)
+CP = cp
+NM = nm
+GREP = grep
+CUCKOO_DIR = ..
+TARGET = $(CUCKOO_DIR)/cktest
 
-CURDIR:=$(PWD)
-
-OPTFLAGS := -O3 -march=native -fomit-frame-pointer -fpie -fPIC -std=gnu11
+OPTFLAGS := -O3 -march=native -fomit-frame-pointer -std=gnu11
 DEBUGFLAGS := -Wall -Wextra -Wconversion -Wcast-qual -Wcast-align -Wshadow \
 	      -Wstrict-aliasing=1 -Wswitch-enum -Wdeclaration-after-statement \
               -Wstrict-prototypes -Wundef -Wpointer-arith -Wformat-security \
@@ -51,60 +43,37 @@ DEBUGFLAGS := -Wall -Wextra -Wconversion -Wcast-qual -Wcast-align -Wshadow \
               -Werror -Wstrict-aliasing
 
 CFLAGS  = -g $(OPTFLAGS) $(DEBUGFLAGS) -pipe
-CPPFLAGS = -c -I$(CURDIR) -D_GNU_SOURCE -DENABLE_UINIT_TEST
-LIBS =
-LDFLAGS = -shared
-ARFLAGS = rcs
+CPPFLAGS = -c -I$(CUCKOO_DIR) -I. -D_GNU_SOURCE
+LIBS = -lcuckoo
+LDFLAGS = -L$(CUCKOO_DIR)
 
-
-ifdef ENABLE_TRACER
-	CPPFLAGS += -DENABLE_TRACER
+ifdef ENABLE_PAPI
+	CPPFLAGS += -DENABLE_PAPI
+        LIBS += -lpapi
 endif
 
-LIBCUCKOO := libcuckoo
-LIBSTATIC := $(LIBCUCKOO).a
-
-SONAME_FLAGS = -Wl,-soname=$(LIBNAME).$(SHARED_EXT).$(LIBVER_MAJOR)
-SHARED_EXT = so
-SHARED_EXT_MAJOR = $(SHARED_EXT).$(LIBVER_MAJOR)
-SHARED_EXT_VER = $(SHARED_EXT).$(LIBVER)
-LIBDYNAMIC = $(LIBCUCKOO).$(SHARED_EXT_VER)
-
-SRCS = \
-	cuckoohash.c \
-        xxhash.c
+SRCS    =       \
+	tinyallocator.c \
+	unittp.c
 
 OBJS = ${SRCS:.c=.o}
+DEPENDS = .depend
 
-.SUFFIXES:	.o .c
-.PHONY:	all
-all:	lib test
+.SUFFIXES:      .o .c
+.PHONY: all clean depend
+all:	depend $(TARGET)
 .c.o:
 	$(CC) $(CFLAGS) $(CPPFLAGS) $<
 
-$(OBJS):	Makefile xxhash.h index_queue.h cuckoohash.h
+$(TARGET): $(OBJS)
+	$(CC) -o $@ $^ $(LIBS) $(LDFLAGS)
 
-# library
-$(LIBSTATIC):	$(OBJS)
-	$(AR) $(ARFLAGS) $@ $^
+$(OBJS): Makefile
 
-$(LIBDYNAMIC):	$(OBJS)
-	$(CC) $(FLAGS) $^ $(LDFLAGS) $(SONAME_FLAGS) -o $@
-	ln -sf $@ $(LIBCUCKOO).$(SHARED_EXT_MAJOR)
-	ln -sf $@ $(LIBCUCKOO).$(SHARED_EXT)
+clean:
+	$(RM) -f $(OBJS) $(TARGET) $(DEPENDS) *~ core core.*
 
-.PHONY: lib
-lib:  ## generate static and dynamic chtbl libraries
-lib: $(LIBSTATIC) $(LIBDYNAMIC)
+depend: $(SRCS) Makefile
+	-@ $(CC) $(CPPFLAGS) -MM -MG $(SRCS) > $(DEPENDS)
 
-.PHONY: clean
-clean:  ## remove all build artifacts
-	$(Q)$(RM) core *.o *.$(SHARED_EXT) *.$(SHARED_EXT).* *.a
-	$(MAKE) -C tests clean
-	@echo cleaning completed
-
-.PHONY: test
-test:	lib
-	$(MAKE) -C tests
-
-
+-include $(DEPENDS)

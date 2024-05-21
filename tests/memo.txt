@@ -1,0 +1,5 @@
+perf stat -e cycles,instructions,dTLB-loads,dTLB-load-misses,cache-references,cache-misses ../cktest -n 1000000 -g
+
+
+perf record -- ../cktest -n 1000000 -g
+perf report
