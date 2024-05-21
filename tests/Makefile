@@ -44,13 +44,16 @@ DEBUGFLAGS := -Wall -Wextra -Wconversion -Wcast-qual -Wcast-align -Wshadow \
 
 CFLAGS  = -g $(OPTFLAGS) $(DEBUGFLAGS) -pipe
 CPPFLAGS = -c -I$(CUCKOO_DIR) -I. -D_GNU_SOURCE
-LIBS = -lcuckoo
-LDFLAGS = -L$(CUCKOO_DIR) -static
+LIBS =
+LDFLAGS =
 
 ifdef ENABLE_PAPI
 	CPPFLAGS += -DENABLE_PAPI
-        LIBS += -lpapi
+        LIBS = -lpapi
 endif
+
+LIBCUCKOO = $(CUCKOO_DIR)/libcuckoo.a
+
 
 SRCS    =       \
 	tinyallocator.c \
@@ -66,7 +69,7 @@ all:	depend $(TARGET)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $<
 
 $(TARGET): $(OBJS)
-	$(CC) -o $@ $^ $(LIBS) $(LDFLAGS)
+	$(CC) -o $@ $^ $(LIBCUCKOO) $(LIBS) $(LDFLAGS)
 
 $(OBJS): Makefile
 

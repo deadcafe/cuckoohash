@@ -715,7 +715,8 @@ static int
 speed_sub(struct cuckoo_hash_s *cuckoo,
           union test_key_u **key_pp,
           unsigned nb,
-          bool do_list)
+          bool do_list,
+          bool do_papi)
 {
         double add = 0, search = 0;
         unsigned target_num = 256 * 1;
@@ -724,37 +725,41 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
         int EventSet = PAPI_NULL;
         int events[] = { PAPI_TLB_DM, PAPI_TOT_INS, PAPI_TOT_CYC, };
         long long values[4];
+#else
+        (void) do_papi;
 #endif
         fprintf(stdout, "%s:%d nb:%u\n", __func__, __LINE__, nb);
         cuckoo_reset(cuckoo);
 
 #if defined(ENABLE_PAPI)
-        ret = PAPI_library_init(PAPI_VER_CURRENT);
-        if (ret < 0) {
-                fprintf(stderr, "Failed to init PAPI lib. %s\n",
-                        PAPI_strerror(ret));
-                return -1;
-        }
-
-        ret = PAPI_create_eventset(&EventSet);
-        if (ret != PAPI_OK) {
-                fprintf(stderr, "Failed to create PAPI event set. %s\n",
-                        PAPI_strerror(ret));
-                return -1;
-        }
-        for (unsigned i = 0; i < ARRAYOF(events); i++) {
-                ret = PAPI_add_event(EventSet, events[i]);
-                if (ret != PAPI_OK) {
-                        fprintf(stderr, "Failed to add PAPI events %u. %s\n",
-                                i, PAPI_strerror(ret));
+        if (do_papi) {
+                ret = PAPI_library_init(PAPI_VER_CURRENT);
+                if (ret < 0) {
+                        fprintf(stderr, "Failed to init PAPI lib. %s\n",
+                                PAPI_strerror(ret));
                         return -1;
                 }
-        }
-        ret = PAPI_start(EventSet);
-        if (ret != PAPI_OK) {
-                fprintf(stderr, "Failed to start PAPI event set. %s\n",
-                        PAPI_strerror(ret));
-                return -1;
+
+                ret = PAPI_create_eventset(&EventSet);
+                if (ret != PAPI_OK) {
+                        fprintf(stderr, "Failed to create PAPI event set. %s\n",
+                                PAPI_strerror(ret));
+                        return -1;
+                }
+                for (unsigned i = 0; i < ARRAYOF(events); i++) {
+                        ret = PAPI_add_event(EventSet, events[i]);
+                        if (ret != PAPI_OK) {
+                                fprintf(stderr, "Failed to add PAPI events %u. %s\n",
+                                        i, PAPI_strerror(ret));
+                                return -1;
+                        }
+                }
+                ret = PAPI_start(EventSet);
+                if (ret != PAPI_OK) {
+                        fprintf(stderr, "Failed to start PAPI event set. %s\n",
+                                PAPI_strerror(ret));
+                        return -1;
+                }
         }
 #endif /* PAPI */
 
@@ -769,16 +774,18 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
         }
 
 #if defined(ENABLE_PAPI)
-        ret = PAPI_stop(EventSet, values);
-        if (ret != PAPI_OK) {
-                fprintf(stderr, "Failed to stop PAPI event set. %s\n",
-                        PAPI_strerror(ret));
-                return -1;
+        if (do_papi) {
+                ret = PAPI_stop(EventSet, values);
+                if (ret != PAPI_OK) {
+                        fprintf(stderr, "Failed to stop PAPI event set. %s\n",
+                                PAPI_strerror(ret));
+                        return -1;
+                }
+                PAPI_shutdown();
+                fprintf(stdout, "IPC:%0.2f %lld\n",
+                        (double) values[1] / (double) values[2],
+                        values[0]);
         }
-        PAPI_shutdown();
-        fprintf(stdout, "IPC:%0.2f %lld\n",
-                (double) values[1] / (double) values[2],
-                values[0]);
 #endif /* PAPI */
 
         fprintf(stdout, "bulk nb:%u add:find %0.2f - %0.2f tsc/key\n",
@@ -828,7 +835,8 @@ static int
 speed_test(struct cuckoo_hash_s *cuckoo,
            union test_key_u **key_pp,
            unsigned nb,
-           bool do_list)
+           bool do_list,
+           bool do_papi)
 {
        int ret = -1;
 
@@ -840,7 +848,7 @@ speed_test(struct cuckoo_hash_s *cuckoo,
                goto end;
 
        for (unsigned i = 0; i < 3; i++) {
-               ret = speed_sub(cuckoo, key_pp, nb, do_list);
+               ret = speed_sub(cuckoo, key_pp, nb, do_list, do_papi);
                if (ret)
                        goto end;
        }
@@ -960,6 +968,7 @@ cuckoo_test(unsigned nb,
             bool do_mem,
             bool do_hp,
             bool do_list,
+            bool do_papi,
             unsigned flags)
 {
         struct mem_root_s *mem_root = NULL;
@@ -1017,7 +1026,7 @@ cuckoo_test(unsigned nb,
         }
 
         if (do_speed_test) {
-                if (speed_test(cuckoo, key, nb, do_list))
+                if (speed_test(cuckoo, key, nb, do_list, do_papi))
                         goto end;
         }
 
@@ -1049,7 +1058,7 @@ static void
 usage(const char *prog)
 {
         fprintf(stderr,
-                "%s [-n nb] [-c ctx] [-s] [-l] [-b] [-m] [-u] [-g] [-d] [-4]\n"
+                "%s [-n nb] [-c ctx] [-s] [-l] [-b] [-m] [-u] [-g] [-d] [-p] [-1][-2][-4][-5]\n"
                 "-n nb	Number of elements\n"
                 "-c ctx	Number of contexts\n"
                 "-s	Speed Test\n"
@@ -1059,7 +1068,11 @@ usage(const char *prog)
                 "-u	Unit Test\n"
                 "-g	Hugepage mode\n"
                 "-d	Debug mode\n"
-                "-4     Disable SSE4.2\n"
+                "-p	use PAPI\n"
+                "-1	Disable SSE4.1\n"
+                "-2	Disable AVX2\n"
+                "-4     Disable SSE4.2 (crc32)\n"
+                "-5	Disable AVX512\n"
                 , prog);
 }
 
@@ -1076,14 +1089,24 @@ main(int ac,
         bool do_mem = false;
         bool do_hp = false;
         bool do_list = true;
+        bool do_papi = false;
         unsigned ctx_size = 7;	/* 1~9 default:5 */
         unsigned flags = 0;
 
-        while ((opt = getopt(ac, av, "c:n:sluabmhgd4")) != -1) {
+        while ((opt = getopt(ac, av, "c:n:sluabmhgdp1245")) != -1) {
 
                 switch (opt) {
+                case '1':
+                        flags |= CUCKOO_DISABLE_FLAG(CUCKOO_DISABLE_SSE41);
+                        break;
+                case '2':
+                        flags |= CUCKOO_DISABLE_FLAG(CUCKOO_DISABLE_AVX2);
+                        break;
                 case '4':
                         flags |= CUCKOO_DISABLE_FLAG(CUCKOO_DISABLE_SSE42);
+                        break;
+                case '5':
+                        flags |= CUCKOO_DISABLE_FLAG(CUCKOO_DISABLE_AVX512);
                         break;
                 case 'g':
                         do_hp = true;
@@ -1115,6 +1138,9 @@ main(int ac,
                 case 'd':
                         flags |= CUCKOO_DISABLE_FLAG(CUCKOO_ENABLE_DEBUG);
                         break;
+                case 'p':
+                        do_papi = true;
+                        break;
                 case 'h':
                 default:
                         usage(av[0]);
@@ -1122,7 +1148,7 @@ main(int ac,
                 }
         }
 
-        cuckoo_test(nb, ctx_size, do_basic, do_speed_test, do_analyze, do_unit, do_mem, do_hp, do_list, flags);
+        cuckoo_test(nb, ctx_size, do_basic, do_speed_test, do_analyze, do_unit, do_mem, do_hp, do_list, do_papi, flags);
 
         return 0;
 }

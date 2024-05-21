@@ -774,7 +774,9 @@ x86_handler_init (struct cuckoo_hash_s *cuckoo,
                 __cpuid_count(1, 0, eax, ebx, ecx, edx);
 
 #if defined(__SSE4_1__)
-                if (!CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_SSE41) && (ecx & bit_SSE4_1)) {
+                if (CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_SSE41)) {
+                        TRACER("ignored SSE4.1\n");
+                } else if (ecx & bit_SSE4_1) {
                         TRACER("use SSE4.1 ready\n");
 
                         cuckoo->find_idx  = SSE41_find_idx_in_bucket;
@@ -783,7 +785,9 @@ x86_handler_init (struct cuckoo_hash_s *cuckoo,
 #endif
 
 #if defined(__SSE4_2__)
-                if (!CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_SSE42) && (ecx & bit_SSE4_2)) {
+                if (CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_SSE42)) {
+                        TRACER("ignored SSE4.2\n");
+                } else if (ecx & bit_SSE4_2) {
                         TRACER("use SSE4.2 ready\n");
 
                         cuckoo->calc_hash = SSE42_calc_hash;
@@ -792,7 +796,9 @@ x86_handler_init (struct cuckoo_hash_s *cuckoo,
                 __cpuid_count(7, 0, eax, ebx, ecx, edx);
 
 #if defined(__AVX2__)
-                if (!CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_AVX2) && (ebx & bit_AVX2)) {
+                if (CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_AVX2)) {
+                        TRACER("ignored AVX2\n");
+                } else if (ebx & bit_AVX2) {
                         TRACER("use AVX2 ready\n");
 
                         cuckoo->find_idx  = AVX2_find_idx_in_bucket;
@@ -801,7 +807,9 @@ x86_handler_init (struct cuckoo_hash_s *cuckoo,
 #endif
 
 #if defined(__AVX512F__)
-                if (!CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_AVX512) && (ebx & bit_AVX512F)) {
+                if (CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_AVX512)) {
+                        TRACER("ignored AVX512\n");
+                } else if (ebx & bit_AVX512F) {
                         TRACER("use AVX512F ready\n");
 
                         cuckoo->find_idx  = AVX512_find_idx_in_bucket;
