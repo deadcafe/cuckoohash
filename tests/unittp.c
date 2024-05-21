@@ -725,6 +725,7 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
         int events[] = { PAPI_TLB_DM, PAPI_TOT_INS, PAPI_TOT_CYC, };
         long long values[4];
 #endif
+        fprintf(stdout, "%s:%d nb:%u\n", __func__, __LINE__, nb);
         cuckoo_reset(cuckoo);
 
 #if defined(ENABLE_PAPI)
@@ -757,7 +758,8 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
         }
 #endif /* PAPI */
 
-        for (unsigned i = 0; i < 64; i++) {
+#define LOOP_SIZE	32
+        for (unsigned i = 0; i < LOOP_SIZE; i++) {
                 random_key(key_pp, nb);
                 cuckoo_reset(cuckoo);
                 add += speed_sub_sub(cuckoo, key_pp, nb, do_list);
@@ -781,7 +783,7 @@ speed_sub(struct cuckoo_hash_s *cuckoo,
 
         fprintf(stdout, "bulk nb:%u add:find %0.2f - %0.2f tsc/key\n",
                 nb,
-                add / 64, search / 64);
+                add / LOOP_SIZE, search / LOOP_SIZE);
 
         return 0;
 }
@@ -791,12 +793,15 @@ analyze_ctx_num(struct cuckoo_hash_s *cuckoo,
                 union test_key_u **key_pp,
                 unsigned nb)
 {
-        for (unsigned i = 0; i < 2; i++) {
-                uint64_t best_tsc = UINT64_C(-1);
-                unsigned best_nb = (unsigned) -1;
+        uint64_t best_tsc = UINT64_C(-1);
+        unsigned best_nb = (unsigned) -1;
+        nb &= (unsigned) ~255;
 
-                for (unsigned ctx_nb = 1; ctx_nb < 9; ctx_nb++) {
-                        uint64_t tsc, dummy;
+        fprintf(stdout, "%s:%d nb:%u\n", __func__, __LINE__, nb);
+
+        for (unsigned i = 0; i < 5; i++) {
+                for (unsigned ctx_nb = 1; ctx_nb < 10; ctx_nb++) {
+                        uint64_t start_tsc, end_tsc, dummy;
 
                         cuckoo_ctxnb_set(cuckoo, ctx_nb);
                         cuckoo_reset(cuckoo);
@@ -805,16 +810,18 @@ analyze_ctx_num(struct cuckoo_hash_s *cuckoo,
                         speed_sub_sub(cuckoo, key_pp, nb, true);
 
                         random_key(key_pp, nb);
-                        speed_sub_sub(cuckoo, key_pp, nb, true);
 
-                        cuckoo_cnt_get(cuckoo, &dummy, &tsc);
-                        if (best_tsc > tsc) {
-                                best_tsc = tsc;
+                        cuckoo_cnt_get(cuckoo, &dummy, &start_tsc);
+                        speed_sub_sub(cuckoo, key_pp, nb, true);
+                        cuckoo_cnt_get(cuckoo, &dummy, &end_tsc);
+
+                        if (best_tsc > (end_tsc - start_tsc)) {
+                                best_tsc = (end_tsc - start_tsc);
                                 best_nb = ctx_nb;
                         }
-                        fprintf(stdout, "ctx_nb:%u\n", best_nb);
                 }
         }
+        fprintf(stdout, "Best ctx_nb:%u\n", best_nb);
 }
 
 static int
@@ -832,7 +839,7 @@ speed_test(struct cuckoo_hash_s *cuckoo,
        if (!nb)
                goto end;
 
-       for (unsigned i = 0; i < 4; i++) {
+       for (unsigned i = 0; i < 3; i++) {
                ret = speed_sub(cuckoo, key_pp, nb, do_list);
                if (ret)
                        goto end;
@@ -943,7 +950,7 @@ mem_area_test(struct cuckoo_hash_s *cuckoo,
         return !(sz == len);
 }
 
-int
+static int
 cuckoo_test(unsigned nb,
             unsigned ctx_size,
             bool do_basic,

@@ -365,15 +365,4 @@ extern int cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
                          const void *user,
                          const void *key);
 
-extern int cuckoo_test(unsigned nb,
-                       unsigned ctx_size,
-                       bool do_basic,
-                       bool do_speed_test,
-                       bool do_analyze,
-                       bool do_unit,
-                       bool do_mem,
-                       bool do_hp,
-                       bool do_list,
-                       unsigned flags);
-
 #endif	/* !_CUCKOOHASH_H_ */

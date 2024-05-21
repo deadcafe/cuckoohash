@@ -45,7 +45,7 @@ DEBUGFLAGS := -Wall -Wextra -Wconversion -Wcast-qual -Wcast-align -Wshadow \
 CFLAGS  = -g $(OPTFLAGS) $(DEBUGFLAGS) -pipe
 CPPFLAGS = -c -I$(CUCKOO_DIR) -I. -D_GNU_SOURCE
 LIBS = -lcuckoo
-LDFLAGS = -L$(CUCKOO_DIR)
+LDFLAGS = -L$(CUCKOO_DIR) -static
 
 ifdef ENABLE_PAPI
 	CPPFLAGS += -DENABLE_PAPI

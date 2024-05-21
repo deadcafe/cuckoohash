@@ -1257,7 +1257,7 @@ list_node(struct cuckoo_hash_s *cuckoo,
                IDXQ_REMOVE(&cuckoo->used_fifo, ctx->found, entry);
                IDXQ_INSERT_HEAD(&cuckoo->used_fifo, ctx->found, entry);
                ctx->found = NULL;
-#if 0
+#if 1
                if (ctx->prev)
                        cacheline_flush(ctx->prev);
 
@@ -1433,9 +1433,17 @@ init_find_engine(struct cuckoo_find_engine_s *engine,
                         struct cuckoo_find_ctx_s *ctx = &engine->ctx_pool[i];
 
                         ctx->idx   = CUCKOO_INVALID_IDX;
-                        ctx->stage = CUCKOO_FIND_STAGE_CALCHASH - (i % CUCKOO_PIPELIN_STAGE_NB);
                         ctx->found = NULL;
-
+#if 1
+                        if (i < ctx_nb)
+                                ctx->stage = CUCKOO_FIND_STAGE_CALCHASH;
+                        else if (i < ctx_nb * 2)
+                                ctx->stage = CUCKOO_FIND_STAGE_CALCHASH - 1;
+                        else
+                                ctx->stage = CUCKOO_FIND_STAGE_CALCHASH - 2;
+#else
+                        ctx->stage = CUCKOO_FIND_STAGE_CALCHASH - (i % CUCKOO_PIPELIN_STAGE_NB);
+#endif
                         alives |= (1 << i);
                 }
         }
@@ -1955,7 +1963,7 @@ do_del_ctx(struct cuckoo_hash_s *cuckoo,
 
         case CUCKOO_DEL_STATE_CLEAN:
                 {
-                        unsigned pos;
+                        unsigned pos = 0;
                         struct cuckoo_bucket_s *bk;
 
                         bk = fetch_cuckoo_current_bucket(cuckoo, ctx->node, &pos);
@@ -2154,7 +2162,7 @@ cuckoo_flipflop(const struct cuckoo_hash_s *cuckoo,
         int ret = -1;
         uint32_t idx = node_idx(cuckoo, node);
         if (idx != CUCKOO_INVALID_IDX) {
-                unsigned pos;
+                unsigned pos = 0;
                 struct cuckoo_bucket_s *bk = fetch_cuckoo_current_bucket(cuckoo, node, &pos);
 
                 if (bk)
@@ -2274,7 +2282,7 @@ struct cuckoo_bucket_s *
 cuckoo_current_bucket(const struct cuckoo_hash_s *cuckoo,
                       const struct cuckoo_node_s * node)
 {
-        unsigned pos;
+        unsigned pos = 0;
         return fetch_cuckoo_current_bucket(cuckoo, node, &pos);
 }
 
@@ -2288,7 +2296,7 @@ cuckoo_another_bucket(const struct cuckoo_hash_s *cuckoo,
         struct cuckoo_bucket_s *bk = NULL;
 
         if (node) {
-                unsigned pos;
+                unsigned pos = 0;
                 uint32_t idx = bucket_idx(cuckoo, fetch_cuckoo_current_bucket(cuckoo, node, &pos));
                 idx = (idx ^ hash2val(node->hash)) & IDX_TBL_MASK(&cuckoo->bk_tbl);
                 bk = bucket_ptr(cuckoo, idx);
@@ -2333,7 +2341,7 @@ cuckoo_verify(const struct cuckoo_hash_s *cuckoo,
         unsigned idx = node_idx(cuckoo, node);
         char msg[256];
         struct cuckoo_bucket_s *cur_bk, *ano_bk;
-        unsigned pos;
+        unsigned pos = 0;
         const void *k;
         union cuckoo_hash_u hash;
 
