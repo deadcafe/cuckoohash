@@ -42,7 +42,8 @@ LIBVER := $(LIBVER_MAJOR).$(LIBVER_MINOR).$(LIBVER_PATCH)
 
 CURDIR:=$(PWD)
 
-OPTFLAGS := -O3 -march=native -fomit-frame-pointer -fpie -fPIC -std=gnu11
+OPTFLAGS := -O3 -fomit-frame-pointer -fpie -fPIC -std=gnu11
+
 DEBUGFLAGS := -Wall -Wextra -Wconversion -Wcast-qual -Wcast-align -Wshadow \
 	      -Wstrict-aliasing=1 -Wswitch-enum -Wdeclaration-after-statement \
               -Wstrict-prototypes -Wundef -Wpointer-arith -Wformat-security \
@@ -51,7 +52,7 @@ DEBUGFLAGS := -Wall -Wextra -Wconversion -Wcast-qual -Wcast-align -Wshadow \
               -Werror -Wstrict-aliasing
 
 CFLAGS  = -g $(OPTFLAGS) $(DEBUGFLAGS) -pipe
-CPPFLAGS = -c -I$(CURDIR) -D_GNU_SOURCE -DENABLE_UINIT_TEST
+CPPFLAGS = -c -I$(CURDIR) -D_GNU_SOURCE
 LIBS =
 LDFLAGS = -shared
 ARFLAGS = rcs

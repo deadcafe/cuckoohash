@@ -158,6 +158,7 @@ typedef uint64_t (*find_hval_in_bucket_t)(const struct cuckoo_hash_s *,
                                           const struct cuckoo_bucket_s *,
                                           uint32_t);
 typedef int (*debug_fprintf_t)(FILE *stream, const char *format, ...);
+typedef void (*clflushopt_t)(void *ptr);
 
 /*
  * cuckoo_hash_s
@@ -181,6 +182,7 @@ struct cuckoo_hash_s {
         find_idx_in_bucket_t find_idx;
         find_hval_in_bucket_t find_hval;
         cuckoo_user_initializer_t user_init;
+        clflushopt_t clflushopt;
 
         uint64_t cnt;
         uint64_t tsc;
@@ -555,6 +557,15 @@ XXH3_calc_hash(const void *key,
 
 BUCKET_DRIVER_GENERATE(GENERIC);
 
+/*
+ * nothing to do
+ */
+always_inline void
+no_cacheline_flush(void * ptr)
+{
+        (void) ptr;
+}
+
 /*****************************************************************************
  * <-- default Handler
  *****************************************************************************/
@@ -563,6 +574,10 @@ BUCKET_DRIVER_GENERATE(GENERIC);
 #include <x86intrin.h>
 #include <cpuid.h>
 
+/*
+ *
+ */
+__attribute__((target("clflushopt")))
 always_inline void
 cacheline_flush(void * ptr)
 {
@@ -572,11 +587,10 @@ cacheline_flush(void * ptr)
 /*****************************************************************************
  * SSE4.1 depened code -->
  *****************************************************************************/
-#if defined(__SSE4_1__)
-
 /*
  *
  */
+__attribute__((target("sse4.1")))
 always_inline uint64_t
 SSE41_cmp_flag(const __m128i *hash,
                const __m128i key)
@@ -593,7 +607,8 @@ SSE41_cmp_flag(const __m128i *hash,
 /*
  *
  */
-always_inline uint64_t
+__attribute__((target("sse4.1")))
+static uint64_t
 SSE41_find_32x16(const uint32_t *array,
                  uint32_t val)
 {
@@ -607,7 +622,6 @@ SSE41_find_32x16(const uint32_t *array,
 
 BUCKET_DRIVER_GENERATE(SSE41);
 
-#endif
 /*****************************************************************************
  * <-- SSE4.1 depened code
  *****************************************************************************/
@@ -615,8 +629,10 @@ BUCKET_DRIVER_GENERATE(SSE41);
 /*****************************************************************************
  * SSE4.2 depened code -->
  *****************************************************************************/
-#if defined(__SSE4_2__)
-
+/*
+ *
+ */
+__attribute__((target("sse4.2")))
 static inline uint32_t
 crc32c(const void *p,
        size_t length,
@@ -659,6 +675,7 @@ crc32c(const void *p,
 /*
  *
  */
+__attribute__((target("sse4.2")))
 static inline union cuckoo_hash_u
 SSE42_calc_hash(const void *key,
                 size_t len,
@@ -681,7 +698,7 @@ SSE42_calc_hash(const void *key,
 
         return hash;
 }
-#endif
+
 /*****************************************************************************
  * <--- SSE4.2 depened code
  *****************************************************************************/
@@ -689,10 +706,10 @@ SSE42_calc_hash(const void *key,
 /*****************************************************************************
  * AVX2 depened code -->
  *****************************************************************************/
-#if defined(__AVX2__)
 /*
  *
  */
+__attribute__((target("avx2")))
 always_inline uint64_t
 AVX2_cmp_flag(const __m256i hash_lo,
               const __m256i hash_hi,
@@ -706,7 +723,8 @@ AVX2_cmp_flag(const __m256i hash_lo,
 /*
  *
  */
-always_inline uint64_t
+__attribute__((target("avx2")))
+static uint64_t
 AVX2_find_32x16(const uint32_t *array,
                 uint32_t val)
 {
@@ -717,8 +735,6 @@ AVX2_find_32x16(const uint32_t *array,
 
 BUCKET_DRIVER_GENERATE(AVX2);
 
-#endif /* __AVX2__ */
-
 /*****************************************************************************
  * <--- AVX2 depened code
  *****************************************************************************/
@@ -726,10 +742,10 @@ BUCKET_DRIVER_GENERATE(AVX2);
 /*****************************************************************************
  * AVX512 depened code -->
  *****************************************************************************/
-#if defined(__AVX512F__)
 /*
  *
  */
+__attribute__((target("avx512f")))
 always_inline uint64_t
 AVX512_cmp_flag(__m512i hash,
                 __m512i key)
@@ -740,19 +756,19 @@ AVX512_cmp_flag(__m512i hash,
 /*
  *
  */
-always_inline uint64_t
+__attribute__((target("avx512f")))
+static uint64_t
 AVX512_find_32x16(const uint32_t *array,
                   uint32_t val)
 {
         __m512i target = _mm512_load_si512((const __m512i *) (const void *) array);
-        __m512i key = _mm512_set1_epi32(val);
+        __m512i key = _mm512_set1_epi32((int) val);
 
         return AVX512_cmp_flag(target, key);
 }
 
 BUCKET_DRIVER_GENERATE(AVX512);
 
-#endif /* __AVX512F__ */
 /*****************************************************************************
  * <--- AVX512 depened code
  *****************************************************************************/
@@ -773,7 +789,6 @@ x86_handler_init (struct cuckoo_hash_s *cuckoo,
         if (eax >= 7) {
                 __cpuid_count(1, 0, eax, ebx, ecx, edx);
 
-#if defined(__SSE4_1__)
                 if (CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_SSE41)) {
                         TRACER("ignored SSE4.1\n");
                 } else if (ecx & bit_SSE4_1) {
@@ -782,9 +797,7 @@ x86_handler_init (struct cuckoo_hash_s *cuckoo,
                         cuckoo->find_idx  = SSE41_find_idx_in_bucket;
                         cuckoo->find_hval = SSE41_find_hval_in_bucket;
                 }
-#endif
 
-#if defined(__SSE4_2__)
                 if (CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_SSE42)) {
                         TRACER("ignored SSE4.2\n");
                 } else if (ecx & bit_SSE4_2) {
@@ -792,10 +805,8 @@ x86_handler_init (struct cuckoo_hash_s *cuckoo,
 
                         cuckoo->calc_hash = SSE42_calc_hash;
                 }
-#endif
                 __cpuid_count(7, 0, eax, ebx, ecx, edx);
 
-#if defined(__AVX2__)
                 if (CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_AVX2)) {
                         TRACER("ignored AVX2\n");
                 } else if (ebx & bit_AVX2) {
@@ -804,18 +815,23 @@ x86_handler_init (struct cuckoo_hash_s *cuckoo,
                         cuckoo->find_idx  = AVX2_find_idx_in_bucket;
                         cuckoo->find_hval = AVX2_find_hval_in_bucket;
                 }
-#endif
 
-#if defined(__AVX512F__)
                 if (CUCKOO_IS_DISABLE(flags, CUCKOO_DISABLE_AVX512)) {
                         TRACER("ignored AVX512\n");
                 } else if (ebx & bit_AVX512F) {
                         TRACER("use AVX512F ready\n");
 
+                        fprintf(stdout, "avx512 ready\n");
+
                         cuckoo->find_idx  = AVX512_find_idx_in_bucket;
                         cuckoo->find_hval = AVX512_find_hval_in_bucket;
                 }
-#endif
+
+                if (ebx & bit_CLFLUSHOPT) {
+                        TRACER("use CLFLUSHOPT ready\n");
+
+                        cuckoo->clflushopt = cacheline_flush;
+                }
         }
 }
 /* __x86_64__ */
@@ -1267,10 +1283,10 @@ list_node(struct cuckoo_hash_s *cuckoo,
                ctx->found = NULL;
 #if 1
                if (ctx->prev)
-                       cacheline_flush(ctx->prev);
+                       cuckoo->clflushopt(ctx->prev);
 
                if (ctx->next)
-                       cacheline_flush(ctx->next);
+                       cuckoo->clflushopt(ctx->next);
 #endif
                ret = 1;
         }
@@ -1380,8 +1396,8 @@ do_find_ctx(struct cuckoo_hash_s *cuckoo,
                                 if (node) {
                                         cuckoo->bkcnt[i] += 1;
 #if 1
-                                        cacheline_flush(ctx->bk[i]->hval);
-                                        cacheline_flush(ctx->bk[i]->idx);
+                                        cuckoo->clflushopt(ctx->bk[i]->hval);
+                                        cuckoo->clflushopt(ctx->bk[i]->idx);
 #endif
                                         break;
                                 }
@@ -1637,6 +1653,7 @@ cuckoo_init(struct cuckoo_hash_s *cuckoo,
         cuckoo->find_idx  = GENERIC_find_idx_in_bucket;
         cuckoo->find_hval = GENERIC_find_hval_in_bucket;
         cuckoo->calc_hash = XXH3_calc_hash;
+        cuckoo->clflushopt = no_cacheline_flush;
 
 #if defined(__x86_64__)
         x86_handler_init(cuckoo, flags);
